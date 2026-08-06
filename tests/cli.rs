@@ -114,6 +114,16 @@ fn render_writes_svg_file() {
     assert!(svg.contains("Hello"));
 }
 
+fn find_element_by_tag<'a>(element: &'a serde_json::Value, tag: &str) -> Option<&'a serde_json::Value> {
+    if element["tag"] == tag {
+        return Some(element);
+    }
+    element["children"]
+        .as_array()?
+        .iter()
+        .find_map(|child| find_element_by_tag(child, tag))
+}
+
 fn http_request(port: u16, method: &str, path: &str, body: &str) -> (String, String) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("failed to connect");
     let request = format!(
@@ -158,6 +168,12 @@ fn serve_exposes_health_parse_render_and_eval() {
     );
     assert!(status.contains("200"), "status: {status}");
     assert!(body.contains("\"title\":\"Hi\""));
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("invalid /v1/parse JSON");
+    let h1 = find_element_by_tag(&parsed["root"], "h1").expect("h1 missing from parsed tree");
+    assert!(
+        h1["layout"]["height"].as_f64().unwrap() > 0.0,
+        "expected a computed layout on h1, got {h1:?}"
+    );
 
     let sample_page = r#"{"title":"Hi","text":"Hola","links":[],"root":{"tag":"document","text":"Hola","href":null,"children":[{"tag":"h1","text":"Hola","href":null,"children":[]}]}}"#;
 

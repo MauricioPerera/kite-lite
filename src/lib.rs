@@ -1,4 +1,5 @@
 mod js;
+mod layout;
 mod render;
 
 use html5ever::{parse_document, tendril::TendrilSink};
@@ -6,12 +7,27 @@ use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use serde::{Deserialize, Serialize};
 use std::default::Default;
 
+/// An element's computed box after `compute_layout` runs: `x`/`y` are its
+/// top-left corner and `width`/`height` its size, all in the same units as
+/// the `viewport_width` passed to `compute_layout`. `x` is always `0.0` in
+/// the current implementation — layout only stacks elements vertically,
+/// there's no horizontal positioning (indentation, columns, floats) yet.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+pub struct Layout {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Element {
     pub tag: String,
     pub text: String,
     pub href: Option<String>,
     pub children: Vec<Element>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<Layout>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -41,6 +57,7 @@ pub struct EvalResponse {
 }
 
 pub use js::{JsRuntime, JsValueResult};
+pub use layout::compute_layout;
 pub use render::render_svg;
 
 /// Rewrites every relative link (`page.links` and each `Element.href`) into
@@ -105,6 +122,7 @@ fn element_from_handle(handle: &Handle) -> Element {
             text: String::new(),
             href,
             children: Vec::new(),
+            layout: None,
         };
     }
 
@@ -127,6 +145,7 @@ fn element_from_handle(handle: &Handle) -> Element {
         text: normalize_text(&text),
         href,
         children,
+        layout: None,
     }
 }
 

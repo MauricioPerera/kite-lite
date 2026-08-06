@@ -15,7 +15,11 @@ El núcleo DOM en Rust:
 - evita estado global en parseo y evaluación local;
 - conserva la URL final (post-redirecciones) y el HTML fuente dentro de una sesión CDP;
 - mantiene cookies entre navegaciones de una misma sesión (`fetch`/CDP)
-  mediante un cliente HTTP con cookie jar propio.
+  mediante un cliente HTTP con cookie jar propio;
+- calcula un layout mínimo por elemento (`{x, y, width, height}` en
+  `Element.layout`) usando una hoja de estilos por defecto fija por tag
+  (tamaños/negrita de h1-h6, márgenes de p/li/blockquote), con ajuste de
+  texto (word wrap) — ver la sección "Layout mínimo" para las limitaciones.
 
 ## Probarlo
 
@@ -35,7 +39,9 @@ cargo run -- cdp 127.0.0.1:9222
 network, or host bindings. The page snapshot exposes `document.title`,
 `document.body.innerText`, and a limited `document.querySelector()` for the
 first `h1`, `h2`, `h3`, `p`, `a`, or `button`. `--svg` writes a deterministic
-first-pass rendering of headings, paragraphs, links, lists, and buttons.
+rendering driven by the minimal layout described below (see "Layout
+mínimo"): every leaf element with text gets word-wrapped and positioned
+according to a fixed default style per tag.
 
 Example:
 
@@ -88,6 +94,33 @@ docker run --rm --network=none --read-only --cap-drop=ALL `
   -v "${PWD}:/output" `
   kite-lite render /input/page.json --output /output/page.svg
 ```
+
+## Layout mínimo
+
+`fetch`, `Page.navigate`/`Page.reload` en CDP, y `POST /v1/parse` calculan un
+layout de bloque simple sobre el árbol y lo guardan en `Element.layout`
+(`{x, y, width, height}`) antes de devolver el `Page`. `render_svg` vuelve a
+calcularlo internamente al ancho exacto que se le pide renderizar (no
+reutiliza el guardado en el JSON, para no desalinearse si se pide un ancho
+distinto).
+
+Esto **no es un motor de CSS**:
+
+- no hay `<style>` ni `style="..."` ni clases/ids — los tamaños, negrita y
+  márgenes son fijos por nombre de tag (h1-h6, p, li, blockquote, strong/b),
+  una imitación mínima de una hoja de estilos de usuario por defecto;
+- no hay flujo inline real: cualquier elemento con hijos apila sus hijos
+  verticalmente a ancho completo. Esto es una limitación real del árbol DOM
+  actual, no solo una simplificación: el parser mezcla el texto suelto de un
+  elemento con el texto de sus hijos en un único campo `text` (sin
+  conservar el orden ni los nodos de texto como hermanos), así que texto
+  suelto junto a un hijo — por ejemplo `<p>Hola <a href="/x">link</a></p>` —
+  no tiene dónde calcularse por separado una vez que el padre tiene un hijo
+  elemento; solo el texto propio de los nodos hoja se ajusta (word wrap) y
+  se dibuja;
+- `x` siempre es `0.0`: no hay eje horizontal en el layout, solo apilado
+  vertical;
+- no hay colapso de márgenes ni floats ni posicionamiento.
 
 ## Control API local
 
@@ -166,7 +199,6 @@ autenticación. No se recomienda exponerlo directamente a Internet.
 
 ## Próximas capas
 
-1. agregar estilos computados y layout mínimos;
-2. implementar interacción DOM y eventos de entrada;
-3. renderizar a PNG/PDF;
-4. ampliar la compatibilidad con Playwright/MCP.
+1. implementar interacción DOM y eventos de entrada;
+2. renderizar a PNG/PDF;
+3. ampliar la compatibilidad con Playwright/MCP.

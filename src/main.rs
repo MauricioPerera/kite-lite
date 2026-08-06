@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use kite_lite_core::{parse_html, render_svg, resolve_links, EvalRequest, EvalResponse};
+use kite_lite_core::{compute_layout, parse_html, render_svg, resolve_links, EvalRequest, EvalResponse};
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -10,6 +10,12 @@ use std::time::{Duration, Instant};
 use tungstenite::{accept, Message};
 
 const JS_TIMEOUT: Duration = Duration::from_millis(1500);
+/// Viewport width used to compute each page's layout when no explicit
+/// render width is requested yet (e.g. right after `fetch`/navigate, before
+/// anyone calls `render`). `render_svg` recomputes layout at whatever width
+/// it's actually asked to render, so this default only affects the layout
+/// data exposed directly in a page's JSON.
+const DEFAULT_VIEWPORT_WIDTH: f64 = 1024.0;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -72,6 +78,7 @@ async fn fetch_page(client: &reqwest::Client, url: &str) -> Result<kite_lite_cor
     let mut page = parse_html(&html);
     page.url = Some(final_url.clone());
     resolve_links(&mut page, &final_url);
+    compute_layout(&mut page, DEFAULT_VIEWPORT_WIDTH);
     Ok(page)
 }
 
@@ -385,6 +392,7 @@ fn navigate_page(session: &mut CdpSession, url: &str) -> serde_json::Value {
                     let mut page = parse_html(&html);
                     page.url = Some(final_url.clone());
                     resolve_links(&mut page, &final_url);
+                    compute_layout(&mut page, DEFAULT_VIEWPORT_WIDTH);
                     session.page = page;
                     serde_json::json!({"frameId": "kite-lite-frame", "loaderId": "kite-lite-loader"})
                 }
@@ -536,7 +544,8 @@ fn handle_http(mut stream: TcpStream) -> Result<()> {
             r#"{"ok":true,"service":"kite-lite"}"#.to_string(),
         ),
         ("POST", "/v1/parse") => {
-            let page = parse_html(body);
+            let mut page = parse_html(body);
+            compute_layout(&mut page, DEFAULT_VIEWPORT_WIDTH);
             ("200 OK", "application/json", serde_json::to_string(&page)?)
         }
         ("POST", "/v1/render") => {
@@ -639,6 +648,7 @@ mod tests {
             text: "Link & more".to_string(),
             href: Some("/x?a=1&b=2".to_string()),
             children: Vec::new(),
+            layout: None,
         };
         assert_eq!(
             element_html(&element),
@@ -658,14 +668,17 @@ mod tests {
                     text: "One".to_string(),
                     href: None,
                     children: Vec::new(),
+                    layout: None,
                 },
                 kite_lite_core::Element {
                     tag: "p".to_string(),
                     text: "Two".to_string(),
                     href: None,
                     children: Vec::new(),
+                    layout: None,
                 },
             ],
+            layout: None,
         };
         assert_eq!(element_html(&root), "<p>One</p><p>Two</p>");
     }
@@ -681,7 +694,9 @@ mod tests {
                 text: "Docs".to_string(),
                 href: Some("/docs".to_string()),
                 children: Vec::new(),
+                layout: None,
             }],
+            layout: None,
         };
         let mut next_id = 1;
         let node = cdp_node(&root, &mut next_id);
