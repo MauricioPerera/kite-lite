@@ -404,8 +404,8 @@ fn cdp_node(element: &kite_lite_core::Element, next_id: &mut u32) -> serde_json:
     })
 }
 
-fn find_selector<'a>(
-    element: &'a kite_lite_core::Element,
+fn find_selector(
+    element: &kite_lite_core::Element,
     selector: &str,
     next_id: &mut u32,
 ) -> Option<u32> {
