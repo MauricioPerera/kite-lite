@@ -160,6 +160,13 @@ fn serve_command(args: &[String]) -> Result<()> {
 struct CdpSession {
     page: kite_lite_core::Page,
     client: reqwest::blocking::Client,
+    /// The node id (in the traversal-order numbering `cdp_node`/`find_node`
+    /// use) of the `<input>`/`<textarea>` last clicked via
+    /// `Input.dispatchMouseEvent`, so `Input.dispatchKeyEvent` knows where
+    /// to type. Reset to `None` whenever the page is replaced (navigate,
+    /// reload, or a click that submits a form) since those ids are only
+    /// valid against the exact tree they were computed from.
+    focused_node_id: Option<u32>,
 }
 
 fn cdp_command(args: &[String]) -> Result<()> {
@@ -184,7 +191,7 @@ fn cdp_command(args: &[String]) -> Result<()> {
     let client = tokio::task::block_in_place(|| {
         reqwest::blocking::Client::builder().cookie_store(true).build()
     })?;
-    let session = CdpSession { page, client };
+    let session = CdpSession { page, client, focused_node_id: None };
     let session = Arc::new(Mutex::new(session));
     let listener = TcpListener::bind(address)?;
     eprintln!("kite-lite CDP listening on {address}");
@@ -222,11 +229,16 @@ fn handle_cdp(stream: TcpStream, session: Arc<Mutex<CdpSession>>) -> Result<()> 
             .unwrap_or_default();
         let response = cdp_response(id, method, request.get("params"), &session);
         socket.send(Message::Text(serde_json::to_string(&response)?.into()))?;
-        if (method == "Page.navigate" || method == "Page.reload")
-            && response
-                .get("result")
-                .and_then(|result| result.get("errorText"))
-                .is_none()
+        // A navigation may come from Page.navigate/Page.reload directly, or
+        // indirectly from clicking a link/submitting a form via
+        // Input.dispatchMouseEvent — detect it by the response shape
+        // (navigate_page's success case always includes "frameId") rather
+        // than by which method was called, so both paths fire the same
+        // load events a real CDP client waits on.
+        if response
+            .get("result")
+            .and_then(|result| result.get("frameId"))
+            .is_some()
         {
             for event in [
                 serde_json::json!({
@@ -307,15 +319,30 @@ fn cdp_response(
                 .unwrap_or(0) as u32;
             let mut next_id = 1;
             let attributes = find_node(&session_guard.page.root, node_id, &mut next_id)
-                .map(|element| {
-                    element
-                        .href
-                        .as_ref()
-                        .map(|href| vec!["href".to_string(), href.clone()])
-                        .unwrap_or_default()
-                })
+                .map(element_attribute_pairs)
                 .unwrap_or_default();
             serde_json::json!({"attributes": attributes})
+        }
+        "DOM.getBoxModel" => {
+            let node_id = params
+                .and_then(|value| value.get("nodeId"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32;
+            let mut next_id = 1;
+            match find_node(&session_guard.page.root, node_id, &mut next_id).and_then(|element| element.layout) {
+                Some(layout) => {
+                    let (x1, y1, x2, y2) =
+                        (layout.x, layout.y, layout.x + layout.width, layout.y + layout.height);
+                    serde_json::json!({
+                        "model": {
+                            "content": [x1, y1, x2, y1, x2, y2, x1, y2],
+                            "width": layout.width,
+                            "height": layout.height
+                        }
+                    })
+                }
+                None => serde_json::json!({}),
+            }
         }
         "DOM.getOuterHTML" => {
             let node_id = params
@@ -358,6 +385,35 @@ fn cdp_response(
             let url = session_guard.page.url.clone().unwrap_or_default();
             navigate_page(&mut session_guard, &url)
         }
+        "Input.dispatchMouseEvent" => {
+            let event_type = params
+                .and_then(|value| value.get("type"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let y = params
+                .and_then(|value| value.get("y"))
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            if event_type == "mousePressed" {
+                dispatch_click(&mut session_guard, y)
+            } else {
+                serde_json::json!({})
+            }
+        }
+        "Input.dispatchKeyEvent" => {
+            let event_type = params
+                .and_then(|value| value.get("type"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let text = params
+                .and_then(|value| value.get("text"))
+                .and_then(serde_json::Value::as_str);
+            let key = params
+                .and_then(|value| value.get("key"))
+                .and_then(serde_json::Value::as_str);
+            dispatch_key(&mut session_guard, event_type, text, key);
+            serde_json::json!({})
+        }
         "Runtime.evaluate" => {
             let expression = params
                 .and_then(|value| value.get("expression"))
@@ -394,6 +450,7 @@ fn navigate_page(session: &mut CdpSession, url: &str) -> serde_json::Value {
                     resolve_links(&mut page, &final_url);
                     compute_layout(&mut page, DEFAULT_VIEWPORT_WIDTH);
                     session.page = page;
+                    session.focused_node_id = None;
                     serde_json::json!({"frameId": "kite-lite-frame", "loaderId": "kite-lite-loader"})
                 }
                 Err(error) => serde_json::json!({"errorText": error.to_string()}),
@@ -401,6 +458,22 @@ fn navigate_page(session: &mut CdpSession, url: &str) -> serde_json::Value {
         }
         Err(error) => serde_json::json!({"errorText": error.to_string()}),
     }
+}
+
+/// Flattens the small set of attributes this project tracks into CDP's
+/// `["key", "value", "key2", "value2", ...]` attribute array shape.
+fn element_attribute_pairs(element: &kite_lite_core::Element) -> Vec<String> {
+    let href_key = if element.tag == "form" { "action" } else { "href" };
+    [
+        (href_key, &element.href),
+        ("value", &element.value),
+        ("name", &element.name),
+        ("type", &element.kind),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| value.as_ref().map(|value| (key.to_string(), value.clone())))
+    .flat_map(|(key, value)| [key, value])
+    .collect()
 }
 
 fn cdp_node(element: &kite_lite_core::Element, next_id: &mut u32) -> serde_json::Value {
@@ -412,11 +485,7 @@ fn cdp_node(element: &kite_lite_core::Element, next_id: &mut u32) -> serde_json:
         .iter()
         .map(|child| cdp_node(child, next_id))
         .collect::<Vec<_>>();
-    let mut attributes = Vec::new();
-    if let Some(href) = &element.href {
-        attributes.push(serde_json::json!("href"));
-        attributes.push(serde_json::json!(href));
-    }
+    let attributes = element_attribute_pairs(element);
     let node_name = if is_document {
         "#document".to_string()
     } else {
@@ -493,15 +562,196 @@ fn find_node<'a>(
     None
 }
 
+fn find_node_mut<'a>(
+    element: &'a mut kite_lite_core::Element,
+    target_id: u32,
+    next_id: &mut u32,
+) -> Option<&'a mut kite_lite_core::Element> {
+    let current_id = *next_id;
+    *next_id += 1;
+    if current_id == target_id {
+        return Some(element);
+    }
+    for child in &mut element.children {
+        if let Some(found) = find_node_mut(child, target_id, next_id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Finds the id (in the same traversal-order numbering as `find_node`) of
+/// the deepest leaf element whose layout box spans vertical position `y`.
+/// Layout in this project only stacks elements vertically (see
+/// `kite_lite_core::compute_layout`), so `x` plays no part in hit-testing —
+/// every row is treated as spanning the full viewport width.
+fn hit_test(element: &kite_lite_core::Element, y: f64, next_id: &mut u32) -> Option<u32> {
+    let current_id = *next_id;
+    *next_id += 1;
+    if element.children.is_empty() {
+        // head/script/style are non-rendering leaves that sit at whatever
+        // degenerate zero-size box the layout left them at (often the same
+        // coordinates as real content next to them) — never let them win a
+        // hit test.
+        if matches!(element.tag.as_str(), "head" | "script" | "style") {
+            return None;
+        }
+        let layout = element.layout?;
+        return (y >= layout.y && y < layout.y + layout.height.max(1.0)).then_some(current_id);
+    }
+    for child in &element.children {
+        if let Some(id) = hit_test(child, y, next_id) {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// Returns the ids of every element on the path from the root down to
+/// `target_id`, inclusive, in root-to-leaf order.
+fn ancestor_chain(
+    element: &kite_lite_core::Element,
+    target_id: u32,
+    next_id: &mut u32,
+    path: &mut Vec<u32>,
+) -> bool {
+    let current_id = *next_id;
+    *next_id += 1;
+    path.push(current_id);
+    if current_id == target_id {
+        return true;
+    }
+    for child in &element.children {
+        if ancestor_chain(child, target_id, next_id, path) {
+            return true;
+        }
+    }
+    path.pop();
+    false
+}
+
+/// What clicking a given element should do — computed read-only from the
+/// page so the caller can apply the mutation (navigate, focus, or submit)
+/// afterward without fighting the borrow checker over `session.page`.
+enum ClickAction {
+    None,
+    Navigate(String),
+    Focus(u32),
+    Submit { action_url: String, query: String },
+}
+
+fn plan_click(page: &kite_lite_core::Page, y: f64) -> ClickAction {
+    let mut next_id = 1;
+    let Some(hit_id) = hit_test(&page.root, y, &mut next_id) else {
+        return ClickAction::None;
+    };
+    let mut next_id = 1;
+    let Some(hit) = find_node(&page.root, hit_id, &mut next_id) else {
+        return ClickAction::None;
+    };
+
+    match hit.tag.as_str() {
+        "a" => hit
+            .href
+            .clone()
+            .map(ClickAction::Navigate)
+            .unwrap_or(ClickAction::None),
+        "input" if hit.kind.as_deref() == Some("submit") => {
+            find_enclosing_form_submit(page, hit_id).unwrap_or(ClickAction::None)
+        }
+        "input" | "textarea" => ClickAction::Focus(hit_id),
+        "button" => find_enclosing_form_submit(page, hit_id).unwrap_or(ClickAction::None),
+        _ => ClickAction::None,
+    }
+}
+
+/// Walks upward from `hit_id` looking for the closest `<form>` ancestor,
+/// and if one exists, builds the query string it would submit from its
+/// descendant `<input>`/`<textarea>` fields' current `name`/`value`. Only
+/// GET-style submission is supported — there's no request body, so a
+/// form's `method="post"` is not honored.
+fn find_enclosing_form_submit(page: &kite_lite_core::Page, hit_id: u32) -> Option<ClickAction> {
+    let mut next_id = 1;
+    let mut path = Vec::new();
+    ancestor_chain(&page.root, hit_id, &mut next_id, &mut path);
+
+    path.into_iter().rev().find_map(|ancestor_id| {
+        let mut next_id = 1;
+        let form = find_node(&page.root, ancestor_id, &mut next_id)?;
+        (form.tag == "form").then(|| {
+            let action_url = form
+                .href
+                .clone()
+                .or_else(|| page.url.clone())
+                .unwrap_or_default();
+            let mut fields = Vec::new();
+            collect_form_fields(form, &mut fields);
+            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+            for (name, value) in &fields {
+                serializer.append_pair(name, value);
+            }
+            ClickAction::Submit { action_url, query: serializer.finish() }
+        })
+    })
+}
+
+fn collect_form_fields(element: &kite_lite_core::Element, fields: &mut Vec<(String, String)>) {
+    if let (Some(name), true) = (&element.name, matches!(element.tag.as_str(), "input" | "textarea"))
+    {
+        fields.push((name.clone(), element.value.clone().unwrap_or_default()));
+    }
+    for child in &element.children {
+        collect_form_fields(child, fields);
+    }
+}
+
+fn dispatch_click(session: &mut CdpSession, y: f64) -> serde_json::Value {
+    match plan_click(&session.page, y) {
+        ClickAction::Navigate(url) => navigate_page(session, &url),
+        ClickAction::Focus(node_id) => {
+            session.focused_node_id = Some(node_id);
+            serde_json::json!({})
+        }
+        ClickAction::Submit { action_url, query } => {
+            let separator = if action_url.contains('?') { "&" } else { "?" };
+            let target = if query.is_empty() {
+                action_url
+            } else {
+                format!("{action_url}{separator}{query}")
+            };
+            navigate_page(session, &target)
+        }
+        ClickAction::None => serde_json::json!({}),
+    }
+}
+
+fn dispatch_key(session: &mut CdpSession, event_type: &str, text: Option<&str>, key: Option<&str>) {
+    let Some(node_id) = session.focused_node_id else {
+        return;
+    };
+    let mut next_id = 1;
+    let Some(element) = find_node_mut(&mut session.page.root, node_id, &mut next_id) else {
+        return;
+    };
+    let mut value = element.value.clone().unwrap_or_default();
+    match (event_type, text, key) {
+        ("char", Some(text), _) => value.push_str(text),
+        ("keyDown", _, Some("Backspace")) => {
+            value.pop();
+        }
+        _ => return,
+    }
+    element.value = Some(value);
+}
+
 fn element_html(element: &kite_lite_core::Element) -> String {
     if element.tag == "document" {
         return element.children.iter().map(element_html).collect();
     }
-    let attributes = element
-        .href
-        .as_ref()
-        .map(|href| format!(" href=\"{}\"", html_escape(href)))
-        .unwrap_or_default();
+    let attributes: String = element_attribute_pairs(element)
+        .chunks(2)
+        .map(|pair| format!(" {}=\"{}\"", pair[0], html_escape(&pair[1])))
+        .collect();
     let children = element
         .children
         .iter()
@@ -641,15 +891,22 @@ mod tests {
         );
     }
 
+    fn el(tag: &str, text: &str, href: Option<&str>, children: Vec<kite_lite_core::Element>) -> kite_lite_core::Element {
+        kite_lite_core::Element {
+            tag: tag.to_string(),
+            text: text.to_string(),
+            href: href.map(str::to_string),
+            children,
+            layout: None,
+            value: None,
+            name: None,
+            kind: None,
+        }
+    }
+
     #[test]
     fn element_html_includes_escaped_href_and_text() {
-        let element = kite_lite_core::Element {
-            tag: "a".to_string(),
-            text: "Link & more".to_string(),
-            href: Some("/x?a=1&b=2".to_string()),
-            children: Vec::new(),
-            layout: None,
-        };
+        let element = el("a", "Link & more", Some("/x?a=1&b=2"), Vec::new());
         assert_eq!(
             element_html(&element),
             "<a href=\"/x?a=1&amp;b=2\">Link &amp; more</a>"
@@ -658,46 +915,23 @@ mod tests {
 
     #[test]
     fn element_html_flattens_document_children() {
-        let root = kite_lite_core::Element {
-            tag: "document".to_string(),
-            text: String::new(),
-            href: None,
-            children: vec![
-                kite_lite_core::Element {
-                    tag: "p".to_string(),
-                    text: "One".to_string(),
-                    href: None,
-                    children: Vec::new(),
-                    layout: None,
-                },
-                kite_lite_core::Element {
-                    tag: "p".to_string(),
-                    text: "Two".to_string(),
-                    href: None,
-                    children: Vec::new(),
-                    layout: None,
-                },
-            ],
-            layout: None,
-        };
+        let root = el(
+            "document",
+            "",
+            None,
+            vec![el("p", "One", None, Vec::new()), el("p", "Two", None, Vec::new())],
+        );
         assert_eq!(element_html(&root), "<p>One</p><p>Two</p>");
     }
 
     #[test]
     fn cdp_node_builds_expected_json_shape() {
-        let root = kite_lite_core::Element {
-            tag: "document".to_string(),
-            text: String::new(),
-            href: None,
-            children: vec![kite_lite_core::Element {
-                tag: "a".to_string(),
-                text: "Docs".to_string(),
-                href: Some("/docs".to_string()),
-                children: Vec::new(),
-                layout: None,
-            }],
-            layout: None,
-        };
+        let root = el(
+            "document",
+            "",
+            None,
+            vec![el("a", "Docs", Some("/docs"), Vec::new())],
+        );
         let mut next_id = 1;
         let node = cdp_node(&root, &mut next_id);
         assert_eq!(node["nodeType"], 9);
@@ -713,6 +947,7 @@ mod tests {
         Arc::new(Mutex::new(CdpSession {
             page,
             client: reqwest::blocking::Client::new(),
+            focused_node_id: None,
         }))
     }
 
@@ -721,6 +956,7 @@ mod tests {
         let mut session = CdpSession {
             page: parse_html("<title>T</title>"),
             client: reqwest::blocking::Client::new(),
+            focused_node_id: None,
         };
         let result = navigate_page(&mut session, "");
         assert_eq!(
@@ -801,5 +1037,95 @@ mod tests {
         );
         let node_ids = select_all["result"]["nodeIds"].as_array().unwrap();
         assert_eq!(node_ids.len(), 2);
+    }
+
+    #[test]
+    fn click_on_a_link_navigates() {
+        let mut page = parse_html(r#"<h1>Title</h1><a href="https://example.com/x">Go</a>"#);
+        compute_layout(&mut page, 800.0);
+        let mut next_id = 1;
+        let link_id = find_selector(&page.root, "a", &mut next_id).unwrap();
+        let mut next_id = 1;
+        let link = find_node(&page.root, link_id, &mut next_id).unwrap();
+        let click_y = link.layout.unwrap().y + 1.0;
+
+        match plan_click(&page, click_y) {
+            ClickAction::Navigate(url) => assert_eq!(url, "https://example.com/x"),
+            _ => panic!("expected Navigate, got a different action"),
+        }
+    }
+
+    #[test]
+    fn click_on_an_input_focuses_it() {
+        let mut page = parse_html(r#"<input name="q" value="hi">"#);
+        compute_layout(&mut page, 800.0);
+        let mut next_id = 1;
+        let input_id = find_selector(&page.root, "input", &mut next_id).unwrap();
+        let mut next_id = 1;
+        let input = find_node(&page.root, input_id, &mut next_id).unwrap();
+        let click_y = input.layout.unwrap().y + 0.5;
+
+        match plan_click(&page, click_y) {
+            ClickAction::Focus(focused_id) => assert_eq!(focused_id, input_id),
+            _ => panic!("expected Focus"),
+        }
+    }
+
+    #[test]
+    fn click_on_submit_button_collects_form_fields_and_targets_action() {
+        let mut page = parse_html(
+            r#"<form action="/search"><input name="q" value="rust"><button>Go</button></form>"#,
+        );
+        compute_layout(&mut page, 800.0);
+        let mut next_id = 1;
+        let button_id = find_selector(&page.root, "button", &mut next_id).unwrap();
+        let mut next_id = 1;
+        let button = find_node(&page.root, button_id, &mut next_id).unwrap();
+        let click_y = button.layout.unwrap().y + 1.0;
+
+        match plan_click(&page, click_y) {
+            ClickAction::Submit { action_url, query } => {
+                assert_eq!(action_url, "/search");
+                assert_eq!(query, "q=rust");
+            }
+            _ => panic!("expected Submit"),
+        }
+    }
+
+    #[test]
+    fn dispatch_key_types_into_and_backspaces_the_focused_input() {
+        let mut page = parse_html(r#"<input name="q">"#);
+        compute_layout(&mut page, 800.0);
+        let mut next_id = 1;
+        let input_id = find_selector(&page.root, "input", &mut next_id).unwrap();
+
+        let mut session = CdpSession {
+            page,
+            client: reqwest::blocking::Client::new(),
+            focused_node_id: Some(input_id),
+        };
+
+        dispatch_key(&mut session, "char", Some("h"), None);
+        dispatch_key(&mut session, "char", Some("i"), None);
+        let mut next_id = 1;
+        let input = find_node(&session.page.root, input_id, &mut next_id).unwrap();
+        assert_eq!(input.value.as_deref(), Some("hi"));
+
+        dispatch_key(&mut session, "keyDown", None, Some("Backspace"));
+        let mut next_id = 1;
+        let input = find_node(&session.page.root, input_id, &mut next_id).unwrap();
+        assert_eq!(input.value.as_deref(), Some("h"));
+    }
+
+    #[test]
+    fn dispatch_key_without_a_focused_node_is_a_no_op() {
+        let mut page = parse_html(r#"<input name="q">"#);
+        compute_layout(&mut page, 800.0);
+        let mut session = CdpSession {
+            page,
+            client: reqwest::blocking::Client::new(),
+            focused_node_id: None,
+        };
+        dispatch_key(&mut session, "char", Some("x"), None);
     }
 }

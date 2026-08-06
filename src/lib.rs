@@ -24,10 +24,26 @@ pub struct Layout {
 pub struct Element {
     pub tag: String,
     pub text: String,
+    /// The element's primary URL-ish attribute: `href` for `<a>`, `action`
+    /// for `<form>` (so it participates in `resolve_links`/navigation the
+    /// same way a link does). `None` for every other tag.
     pub href: Option<String>,
     pub children: Vec<Element>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<Layout>,
+    /// The current value of an `<input>`/`<textarea>`: the `value`
+    /// attribute (or the element's own text, for `<textarea>`) at parse
+    /// time, mutable afterward via CDP's `Input.dispatchKeyEvent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// The `name` attribute, used to build a form's submitted query string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The `type` attribute (named `kind` since `type` is a keyword),
+    /// currently only inspected on `<input>` to tell a submit button
+    /// (`type="submit"`) apart from a text field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -105,15 +121,21 @@ pub fn parse_html(source: &str) -> Page {
 }
 
 fn element_from_handle(handle: &Handle) -> Element {
-    let (tag, href) = match &handle.data {
-        NodeData::Element { name, attrs, .. } => {
-            let href = attrs.borrow().iter().find_map(|attr| {
-                (attr.name.local.as_ref() == "href").then(|| attr.value.to_string())
-            });
-            (name.local.to_string(), href)
+    let (tag, href, value, name, kind) = match &handle.data {
+        NodeData::Element { name: tag_name, attrs, .. } => {
+            let attrs = attrs.borrow();
+            let tag = tag_name.local.to_string();
+            let href_attr_name = if tag == "form" { "action" } else { "href" };
+            let attr = |attr_name: &str| -> Option<String> {
+                attrs
+                    .iter()
+                    .find(|attr| attr.name.local.as_ref() == attr_name)
+                    .map(|attr| attr.value.to_string())
+            };
+            (tag, attr(href_attr_name), attr("value"), attr("name"), attr("type"))
         }
-        NodeData::Document => ("document".to_string(), None),
-        _ => ("text".to_string(), None),
+        NodeData::Document => ("document".to_string(), None, None, None, None),
+        _ => ("text".to_string(), None, None, None, None),
     };
 
     if matches!(tag.as_str(), "head" | "script" | "style") {
@@ -123,6 +145,9 @@ fn element_from_handle(handle: &Handle) -> Element {
             href,
             children: Vec::new(),
             layout: None,
+            value,
+            name,
+            kind,
         };
     }
 
@@ -139,13 +164,25 @@ fn element_from_handle(handle: &Handle) -> Element {
             _ => {}
         }
     }
+    let text = normalize_text(&text);
+
+    // <textarea>initial value</textarea> sets its value via child text, not
+    // a `value` attribute.
+    let value = if tag == "textarea" && value.is_none() {
+        Some(text.clone())
+    } else {
+        value
+    };
 
     Element {
         tag,
-        text: normalize_text(&text),
+        text,
         href,
         children,
         layout: None,
+        value,
+        name,
+        kind,
     }
 }
 
@@ -249,5 +286,36 @@ mod tests {
         let mut page = parse_html(r#"<a href="/docs">Docs</a>"#);
         resolve_links(&mut page, "not a url");
         assert_eq!(page.links, vec!["/docs"]);
+    }
+
+    fn find_by_tag<'a>(element: &'a Element, tag: &str) -> Option<&'a Element> {
+        if element.tag == tag {
+            return Some(element);
+        }
+        element.children.iter().find_map(|child| find_by_tag(child, tag))
+    }
+
+    #[test]
+    fn captures_input_value_name_and_kind() {
+        let page = parse_html(r#"<input type="text" name="q" value="hello">"#);
+        let input = find_by_tag(&page.root, "input").expect("input missing");
+        assert_eq!(input.value.as_deref(), Some("hello"));
+        assert_eq!(input.name.as_deref(), Some("q"));
+        assert_eq!(input.kind.as_deref(), Some("text"));
+    }
+
+    #[test]
+    fn textarea_defaults_value_to_its_text_content() {
+        let page = parse_html(r#"<textarea name="bio">Initial text</textarea>"#);
+        let textarea = find_by_tag(&page.root, "textarea").expect("textarea missing");
+        assert_eq!(textarea.value.as_deref(), Some("Initial text"));
+    }
+
+    #[test]
+    fn form_action_is_captured_as_href_and_gets_resolved() {
+        let mut page = parse_html(r#"<form action="/search"><input name="q"></form>"#);
+        resolve_links(&mut page, "https://example.com/dir/index.html");
+        let form = find_by_tag(&page.root, "form").expect("form missing");
+        assert_eq!(form.href.as_deref(), Some("https://example.com/search"));
     }
 }

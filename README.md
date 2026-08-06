@@ -19,7 +19,9 @@ El núcleo DOM en Rust:
 - calcula un layout mínimo por elemento (`{x, y, width, height}` en
   `Element.layout`) usando una hoja de estilos por defecto fija por tag
   (tamaños/negrita de h1-h6, márgenes de p/li/blockquote), con ajuste de
-  texto (word wrap) — ver la sección "Layout mínimo" para las limitaciones.
+  texto (word wrap) — ver la sección "Layout mínimo" para las limitaciones;
+  permite click/escritura/submit de formularios por CDP sin ejecutar JS de
+  la página — ver "Interacción: click, escritura y submit de formularios".
 
 ## Probarlo
 
@@ -146,9 +148,11 @@ DevTools Protocol:
 - `Page.getNavigationHistory`, `Page.getResourceTree`;
 - `Page.navigate`, `Page.reload`, `Page.captureSnapshot`;
 - `DOM.getDocument`, `DOM.querySelector`, `DOM.querySelectorAll`;
-- `DOM.getOuterHTML`, `DOM.getAttributes`;
+- `DOM.getOuterHTML`, `DOM.getAttributes`, `DOM.getBoxModel`;
+- `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`;
 - eventos básicos `Page.frameStartedLoading`, `Page.loadEventFired` y
-  `Page.frameStoppedLoading`.
+  `Page.frameStoppedLoading` (se disparan tanto tras `Page.navigate`/`reload`
+  como tras un click que termina navegando).
 
 Ejecuta `cdp` con un snapshot JSON para iniciar una sesión desde una página
 serializada. Sin snapshot inicia una página vacía:
@@ -176,10 +180,40 @@ Ejemplo conceptual de una llamada CDP:
 {"id":3,"method":"DOM.getOuterHTML","params":{"nodeId":6}}
 ```
 
-La implementación todavía no ofrece layout real, eventos de entrada, captura
-PNG/PDF, ejecución de scripts de la página ni eventos de red. Tampoco modela
-múltiples pestañas/targets: cada proceso `cdp` sirve un único `Page`
-compartido por todas las conexiones WebSocket que se le hagan.
+La implementación todavía no ofrece captura PNG/PDF, ejecución de scripts de
+la página ni eventos de red. Tampoco modela múltiples pestañas/targets: cada
+proceso `cdp` sirve un único `Page` compartido por todas las conexiones
+WebSocket que se le hagan.
+
+## Interacción: click, escritura y submit de formularios
+
+`Input.dispatchMouseEvent` (`type: "mousePressed"`) y `Input.dispatchKeyEvent`
+(`type: "char"`/`"keyDown"`) implementan una interacción **sin ejecutar JS de
+la página** — como un navegador con JavaScript desactivado:
+
+- click en un nodo cuya caja de layout contiene la `y` del evento:
+  - `<a href>` → navega a esa URL (mismo camino que `Page.navigate`: cookies,
+    redirecciones y resolución de URL de la sesión aplican igual);
+  - `<input>`/`<textarea>` → lo enfoca, para que `Input.dispatchKeyEvent`
+    sepa dónde escribir (el foco se pierde en cualquier navegación);
+  - `<button>`, o `<input type="submit">` → busca el `<form>` ancestro más
+    cercano, junta el `name`/valor actual de sus `<input>`/`<textarea>`
+    descendientes en una query string y navega a `action?query` (o a la URL
+    actual si no hay `action`).
+- `Input.dispatchKeyEvent` con `type:"char"` agrega `text` al `value` del
+  nodo enfocado; con `type:"keyDown"` y `key:"Backspace"` borra el último
+  carácter.
+
+Ningún click ejecuta `onclick` ni corre `<script>` de la página — sigue sin
+haber un DOM vivo ligado a JS, por las mismas razones que en "Layout mínimo".
+Limitaciones adicionales: el click es por coordenada `y` únicamente (no hay
+eje `x` en el layout — ver "Layout mínimo"); solo se arma un submit `GET`
+(el `method`/`action` con POST no se soporta, no hay cuerpo de request);
+`<select>`/checkboxes/radios no tienen semántica propia, se tratan como
+cualquier otro nodo sin acción especial. Para saber dónde clickear, un
+cliente CDP real primero hace `DOM.querySelector` y después
+`DOM.getBoxModel` para obtener las coordenadas — igual que Playwright/Chrome
+DevTools.
 
 ## Despliegue en VPS
 
@@ -199,6 +233,5 @@ autenticación. No se recomienda exponerlo directamente a Internet.
 
 ## Próximas capas
 
-1. implementar interacción DOM y eventos de entrada;
-2. renderizar a PNG/PDF;
-3. ampliar la compatibilidad con Playwright/MCP.
+1. renderizar a PNG/PDF;
+2. ampliar la compatibilidad con Playwright/MCP.

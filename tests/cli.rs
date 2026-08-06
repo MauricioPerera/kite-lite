@@ -438,3 +438,181 @@ fn cdp_session_persists_cookies_across_navigations() {
     let eval2 = read_json_message(&mut socket);
     assert_eq!(eval2["result"]["result"]["value"], "Cookie OK");
 }
+
+fn send_cdp(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>,
+    id: u64,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    socket
+        .send(tungstenite::Message::Text(
+            serde_json::json!({"id": id, "method": method, "params": params})
+                .to_string()
+                .into(),
+        ))
+        .unwrap_or_else(|_| panic!("failed to send {method}"));
+    read_json_message(socket)
+}
+
+/// A minimal local HTTP server with a link and a form, used to verify that
+/// clicking navigates and that submitting a form sends its field values —
+/// without depending on the real internet.
+fn spawn_interaction_server(port: u16) {
+    let listener = TcpListener::bind(("127.0.0.1", port)).expect("failed to bind mock server");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buffer = [0_u8; 4096];
+            let size = match stream.read(&mut buffer) {
+                Ok(size) => size,
+                Err(_) => continue,
+            };
+            let request = String::from_utf8_lossy(&buffer[..size]);
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or("/")
+                .to_string();
+            let (route, query) = path.split_once('?').unwrap_or((path.as_str(), ""));
+
+            let body = match route {
+                "/" => {
+                    r#"<title>Home</title><a href="/target">Go</a><form action="/search"><input name="q"><button>Search</button></form>"#
+                        .to_string()
+                }
+                "/target" => "<title>Landed</title>".to_string(),
+                "/search" => {
+                    let q = url::form_urlencoded::parse(query.as_bytes())
+                        .find(|(key, _)| key == "q")
+                        .map(|(_, value)| value.into_owned())
+                        .unwrap_or_default();
+                    format!("<title>Results: {q}</title>")
+                }
+                _ => String::new(),
+            };
+            let status = if body.is_empty() { "404 Not Found" } else { "200 OK" };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+}
+
+#[test]
+fn click_navigates_and_form_submit_sends_field_values() {
+    let mock_port = 19021;
+    spawn_interaction_server(mock_port);
+    wait_for_port(mock_port);
+
+    let cdp_port = 18925;
+    let child = Command::new(bin_path())
+        .args(["cdp", &format!("127.0.0.1:{cdp_port}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to start kite-lite cdp");
+    let _guard = ChildGuard(child);
+    wait_for_port(cdp_port);
+
+    let (mut socket, _) = tungstenite::connect(format!("ws://127.0.0.1:{cdp_port}/"))
+        .expect("failed to connect CDP websocket");
+
+    let nav = send_cdp(
+        &mut socket,
+        1,
+        "Page.navigate",
+        serde_json::json!({"url": format!("http://127.0.0.1:{mock_port}/")}),
+    );
+    assert!(nav["result"].get("frameId").is_some(), "navigate failed: {nav:?}");
+    drain_events(&mut socket, 3);
+
+    // Click the <a href="/target"> by first asking where it is (DOM.getBoxModel,
+    // the same way a real CDP client like Playwright would), then dispatching
+    // a mouse event at a point inside its box.
+    let select_link = send_cdp(&mut socket, 2, "DOM.querySelector", serde_json::json!({"selector": "a"}));
+    let link_id = select_link["result"]["nodeId"].as_u64().unwrap();
+    let box_model = send_cdp(&mut socket, 3, "DOM.getBoxModel", serde_json::json!({"nodeId": link_id}));
+    let content = box_model["result"]["model"]["content"].as_array().unwrap();
+    let link_y = content[1].as_f64().unwrap() + 0.5;
+
+    let click = send_cdp(
+        &mut socket,
+        4,
+        "Input.dispatchMouseEvent",
+        serde_json::json!({"type": "mousePressed", "x": 0, "y": link_y}),
+    );
+    assert!(
+        click["result"].get("frameId").is_some(),
+        "click on link should have navigated: {click:?}"
+    );
+    drain_events(&mut socket, 3);
+
+    let title_after_click = send_cdp(
+        &mut socket,
+        5,
+        "Runtime.evaluate",
+        serde_json::json!({"expression": "document.title"}),
+    );
+    assert_eq!(title_after_click["result"]["result"]["value"], "Landed");
+
+    // Navigate back to the form page, type into the input, then click the
+    // submit button and confirm the field's value made it into the query
+    // string the server received.
+    let nav_back = send_cdp(
+        &mut socket,
+        6,
+        "Page.navigate",
+        serde_json::json!({"url": format!("http://127.0.0.1:{mock_port}/")}),
+    );
+    assert!(nav_back["result"].get("frameId").is_some(), "nav back failed: {nav_back:?}");
+    drain_events(&mut socket, 3);
+
+    let select_input = send_cdp(&mut socket, 7, "DOM.querySelector", serde_json::json!({"selector": "input"}));
+    let input_id = select_input["result"]["nodeId"].as_u64().unwrap();
+    let input_box = send_cdp(&mut socket, 8, "DOM.getBoxModel", serde_json::json!({"nodeId": input_id}));
+    let input_content = input_box["result"]["model"]["content"].as_array().unwrap();
+    let input_y = input_content[1].as_f64().unwrap() + 0.5;
+
+    send_cdp(
+        &mut socket,
+        9,
+        "Input.dispatchMouseEvent",
+        serde_json::json!({"type": "mousePressed", "x": 0, "y": input_y}),
+    );
+    send_cdp(
+        &mut socket,
+        10,
+        "Input.dispatchKeyEvent",
+        serde_json::json!({"type": "char", "text": "rust"}),
+    );
+
+    let select_button = send_cdp(&mut socket, 11, "DOM.querySelector", serde_json::json!({"selector": "button"}));
+    let button_id = select_button["result"]["nodeId"].as_u64().unwrap();
+    let button_box = send_cdp(&mut socket, 12, "DOM.getBoxModel", serde_json::json!({"nodeId": button_id}));
+    let button_content = button_box["result"]["model"]["content"].as_array().unwrap();
+    let button_y = button_content[1].as_f64().unwrap() + 0.5;
+
+    let submit = send_cdp(
+        &mut socket,
+        13,
+        "Input.dispatchMouseEvent",
+        serde_json::json!({"type": "mousePressed", "x": 0, "y": button_y}),
+    );
+    assert!(
+        submit["result"].get("frameId").is_some(),
+        "form submit should have navigated: {submit:?}"
+    );
+    drain_events(&mut socket, 3);
+
+    let title_after_submit = send_cdp(
+        &mut socket,
+        14,
+        "Runtime.evaluate",
+        serde_json::json!({"expression": "document.title"}),
+    );
+    assert_eq!(title_after_submit["result"]["result"]["value"], "Results: rust");
+}

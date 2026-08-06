@@ -93,7 +93,15 @@ fn layout_element(element: &mut Element, y: f64, available_width: f64) -> f64 {
 
     let content_height = if element.children.is_empty() {
         if element.text.is_empty() {
-            0.0
+            // <input>/<textarea> are rendered form controls, not just a
+            // text carrier — they need a real clickable box even with no
+            // text, or they'd collapse to a degenerate zero-height sliver
+            // that overlaps whatever comes right after them.
+            if matches!(element.tag.as_str(), "input" | "textarea") {
+                line_height(style.font_size)
+            } else {
+                0.0
+            }
         } else {
             let lines = wrap_text(&element.text, available_width, style.font_size);
             lines.len() as f64 * line_height(style.font_size)
@@ -154,5 +162,41 @@ mod tests {
         let mut page = parse_html("");
         compute_layout(&mut page, 500.0);
         assert_eq!(page.root.layout.unwrap().height, 0.0);
+    }
+
+    #[test]
+    fn empty_input_still_gets_a_real_clickable_height() {
+        // An <input> with no text would otherwise get a 0-height box,
+        // colliding with whatever sits right after it during hit-testing
+        // (see the click/form integration test this guards against).
+        let mut page = parse_html(r#"<input name="q"><button>Go</button>"#);
+        compute_layout(&mut page, 800.0);
+
+        let mut hrefs_found = Vec::new();
+        fn find_by_tag<'a>(
+            element: &'a crate::Element,
+            tag: &str,
+            out: &mut Vec<&'a crate::Element>,
+        ) {
+            if element.tag == tag {
+                out.push(element);
+            }
+            for child in &element.children {
+                find_by_tag(child, tag, out);
+            }
+        }
+        find_by_tag(&page.root, "input", &mut hrefs_found);
+        let input = hrefs_found.first().expect("input missing");
+        let input_layout = input.layout.expect("input should have a computed layout");
+
+        let mut buttons = Vec::new();
+        find_by_tag(&page.root, "button", &mut buttons);
+        let button_layout = buttons.first().unwrap().layout.unwrap();
+
+        assert!(input_layout.height > 0.0, "empty input should still have real height");
+        assert!(
+            button_layout.y >= input_layout.y + input_layout.height,
+            "button should not overlap the empty input's box"
+        );
     }
 }
