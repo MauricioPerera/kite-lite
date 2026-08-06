@@ -1,6 +1,38 @@
 use crate::{render_svg, Page};
 use anyhow::{Context, Result};
 
+/// Loads system fonts and makes sure the generic `sans-serif` family (the
+/// only one this project's rendered SVG ever asks for) actually resolves to
+/// something that got loaded.
+///
+/// `fontdb` hard-codes `sans-serif` to "Arial" by default, and only
+/// overrides that from the *fontconfig* config files (`/etc/fonts/*.conf`)
+/// if fontconfig itself is installed. This project's own Docker image
+/// installs `fonts-dejavu-core` (font files) but not the `fontconfig`
+/// package (the config that would tell fontdb "sans-serif means DejaVu
+/// Sans here") — so without this fallback, `sans-serif` resolves to a font
+/// that was never loaded, and every text node silently fails to render: no
+/// error, just a blank image. If the generic family doesn't resolve, fall
+/// back to whatever font actually got loaded.
+fn load_fonts(fontdb: &mut usvg::fontdb::Database) {
+    fontdb.load_system_fonts();
+    let resolves = fontdb
+        .query(&usvg::fontdb::Query {
+            families: &[usvg::fontdb::Family::SansSerif],
+            ..Default::default()
+        })
+        .is_some();
+    if !resolves {
+        let fallback_family = fontdb
+            .faces()
+            .next()
+            .and_then(|face| face.families.first().map(|(name, _)| name.clone()));
+        if let Some(family) = fallback_family {
+            fontdb.set_sans_serif_family(family);
+        }
+    }
+}
+
 /// Rasterizes the page's SVG rendering (see `render_svg`) to PNG bytes at
 /// the given viewport width.
 ///
@@ -13,7 +45,7 @@ use anyhow::{Context, Result};
 pub fn render_png(page: &Page, width: u32) -> Result<Vec<u8>> {
     let svg = render_svg(page, width);
     let mut options = usvg::Options::default();
-    options.fontdb_mut().load_system_fonts();
+    load_fonts(options.fontdb_mut());
     let tree = usvg::Tree::from_str(&svg, &options).context("failed to parse rendered SVG")?;
     let size = tree.size().to_int_size();
     let mut pixmap = tiny_skia::Pixmap::new(size.width(), size.height())
@@ -69,6 +101,22 @@ mod tests {
         let page = parse_html("<h1>Hello</h1>");
         let png = render_png(&page, 320).expect("PNG rendering failed");
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "missing PNG signature");
+    }
+
+    #[test]
+    fn rendered_png_actually_draws_text_pixels() {
+        // A valid PNG signature isn't enough to prove text rendered: an
+        // unresolved font family fails silently and produces a
+        // structurally valid but entirely blank (all-white) image. This
+        // guards against that regression by checking real pixel content.
+        let page = parse_html("<h1>Hello</h1>");
+        let png = render_png(&page, 320).expect("PNG rendering failed");
+        let pixmap = tiny_skia::Pixmap::decode_png(&png).expect("failed to decode rendered PNG");
+        let has_non_white_pixel = pixmap
+            .pixels()
+            .iter()
+            .any(|pixel| pixel.red() != 255 || pixel.green() != 255 || pixel.blue() != 255);
+        assert!(has_non_white_pixel, "rendered PNG is entirely blank/white");
     }
 
     #[test]
