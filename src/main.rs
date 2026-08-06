@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
-use kite_lite_core::{parse_html, render_svg, JsRuntime};
-use serde::{Deserialize, Serialize};
+use kite_lite_core::{parse_html, render_svg, EvalRequest, EvalResponse};
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -12,25 +11,9 @@ use tungstenite::{accept, Message};
 
 const JS_TIMEOUT: Duration = Duration::from_millis(1500);
 
-#[derive(Deserialize, Serialize)]
-struct EvalRequest {
-    page: kite_lite_core::Page,
-    script: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct EvalResponse {
-    value: Option<String>,
-    error: Option<String>,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
-
-    if args.get(1).map(String::as_str) == Some("--eval-js-child") {
-        return run_js_child().await;
-    }
 
     if args.get(1).map(String::as_str) == Some("fetch") {
         return fetch_command(&args).await;
@@ -540,24 +523,6 @@ fn handle_http(mut stream: TcpStream) -> Result<()> {
     Ok(())
 }
 
-async fn run_js_child() -> Result<()> {
-    let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
-    let request: EvalRequest = serde_json::from_str(&input)?;
-    let response = match JsRuntime::default().evaluate_page(&request.page, &request.script) {
-        Ok(value) => EvalResponse {
-            value: Some(value),
-            error: None,
-        },
-        Err(error) => EvalResponse {
-            value: None,
-            error: Some(error.to_string()),
-        },
-    };
-    println!("{}", serde_json::to_string(&response)?);
-    Ok(())
-}
-
 fn evaluate_js_in_child(
     page: &kite_lite_core::Page,
     script: &str,
@@ -567,13 +532,14 @@ fn evaluate_js_in_child(
         page: page.clone(),
         script: script.to_owned(),
     })?;
-    let executable = env::current_exe()?;
-    let mut child = Command::new(executable)
-        .arg("--eval-js-child")
+    let js_binary = env::current_exe()?
+        .with_file_name(format!("kite-lite-js{}", env::consts::EXE_SUFFIX));
+    let mut child = Command::new(js_binary)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn()
+        .context("failed to spawn the kite-lite-js evaluator process")?;
 
     child
         .stdin

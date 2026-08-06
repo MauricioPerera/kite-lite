@@ -12,6 +12,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 kite
 COPY --from=builder /build/target/release/kite-lite /usr/local/bin/kite-lite
+COPY --from=builder /build/target/release/kite-lite-js /usr/local/bin/kite-lite-js
 USER kite
 WORKDIR /home/kite
 ENTRYPOINT ["/usr/local/bin/kite-lite"]

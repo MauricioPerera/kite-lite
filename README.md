@@ -41,9 +41,13 @@ cargo run -- https://example.com --js "document.title + ' / ' + document.querySe
 ```
 
 The JavaScript context now has source-size, recursion, and VM stack limits. The
-CLI additionally runs page scripts in a child process and terminates them after
-1.5 seconds. This is a useful local isolation boundary; production deployments
-should still add OS-level resource limits and containers or microVMs.
+CLI additionally runs page scripts in a separate `kite-lite-js` process and
+terminates it after 1.5 seconds. That evaluator binary does not link
+`reqwest`/`tokio` at all, so it cannot make network requests regardless of
+what a script tries to do — the isolation is a property of what's compiled
+into the executable, not just of what the code chooses to call. This is a
+useful local isolation boundary; production deployments should still add
+OS-level resource limits and containers or microVMs.
 
 ## Ejecutar con límites del sistema
 
@@ -60,7 +64,10 @@ docker run --rm `
 ```
 
 El acceso de red es necesario en este modo para descargar la URL. Para páginas
-ya serializadas, se puede ejecutar el evaluador sin red:
+ya serializadas, se puede ejecutar el evaluador sin red — y desde que el
+evaluador (`kite-lite-js`) es un binario separado que no enlaza `reqwest` ni
+`tokio`, `--network=none` es una garantía real del binario, no solo de la
+configuración del contenedor:
 
 ```powershell
 docker run --rm --network=none --memory=256m --cpus=0.5 --pids-limit=64 `
@@ -147,9 +154,8 @@ autenticación. No se recomienda exponerlo directamente a Internet.
 
 ## Próximas capas
 
-1. separar fetcher y ejecutor JS para permitir `--network=none`;
-2. resolver URLs, cookies y redirecciones por sesión;
-3. agregar estilos computados y layout mínimos;
-4. implementar interacción DOM y eventos de entrada;
-5. renderizar a PNG/PDF;
-6. ampliar la compatibilidad con Playwright/MCP.
+1. resolver URLs, cookies y redirecciones por sesión;
+2. agregar estilos computados y layout mínimos;
+3. implementar interacción DOM y eventos de entrada;
+4. renderizar a PNG/PDF;
+5. ampliar la compatibilidad con Playwright/MCP.

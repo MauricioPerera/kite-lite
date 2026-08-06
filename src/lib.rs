@@ -26,6 +26,20 @@ pub struct Page {
     pub source: Option<String>,
 }
 
+/// The JSON contract between a fetcher/CLI process and the isolated
+/// `kite-lite-js` evaluator process spoken over stdin/stdout.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct EvalRequest {
+    pub page: Page,
+    pub script: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct EvalResponse {
+    pub value: Option<String>,
+    pub error: Option<String>,
+}
+
 pub use js::{JsRuntime, JsValueResult};
 pub use render::render_svg;
 
