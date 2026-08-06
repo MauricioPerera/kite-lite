@@ -1,0 +1,611 @@
+use anyhow::{Context, Result};
+use kite_lite_core::{parse_html, render_svg, JsRuntime};
+use serde::{Deserialize, Serialize};
+use std::env;
+use std::fs;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tungstenite::{accept, Message};
+
+const JS_TIMEOUT: Duration = Duration::from_millis(1500);
+
+#[derive(Deserialize, Serialize)]
+struct EvalRequest {
+    page: kite_lite_core::Page,
+    script: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EvalResponse {
+    value: Option<String>,
+    error: Option<String>,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args: Vec<String> = env::args().collect();
+
+    if args.get(1).map(String::as_str) == Some("--eval-js-child") {
+        return run_js_child().await;
+    }
+
+    if args.get(1).map(String::as_str) == Some("fetch") {
+        return fetch_command(&args).await;
+    }
+
+    if args.get(1).map(String::as_str) == Some("eval") {
+        return eval_command(&args);
+    }
+
+    if args.get(1).map(String::as_str) == Some("render") {
+        return render_command(&args);
+    }
+
+    if args.get(1).map(String::as_str) == Some("serve") {
+        return serve_command(&args);
+    }
+
+    if args.get(1).map(String::as_str) == Some("cdp") {
+        return cdp_command(&args);
+    }
+
+    let url = args
+        .get(1)
+        .context("usage: kite-lite <url> [--svg output.svg] [--js code]")?;
+    let html = reqwest::get(url).await?.error_for_status()?.text().await?;
+    let page = parse_html(&html);
+
+    if let Some(index) = args.iter().position(|arg| arg == "--svg") {
+        let output = args
+            .get(index + 1)
+            .context("--svg requires an output path")?;
+        fs::write(output, render_svg(&page, 1024))?;
+        eprintln!("SVG written to {output}");
+    }
+
+    if let Some(index) = args.iter().position(|arg| arg == "--js") {
+        let script = args
+            .get(index + 1)
+            .context("--js requires JavaScript source")?;
+        let result = evaluate_js_in_child(&page, script, JS_TIMEOUT)?;
+        eprintln!("JavaScript result: {result}");
+    }
+
+    println!("{}", serde_json::to_string_pretty(&page)?);
+    Ok(())
+}
+
+async fn fetch_command(args: &[String]) -> Result<()> {
+    let url = args
+        .get(2)
+        .context("usage: kite-lite fetch <url> [--output page.json]")?;
+    let html = reqwest::get(url).await?.error_for_status()?.text().await?;
+    let page = parse_html(&html);
+    let serialized = serde_json::to_string_pretty(&page)?;
+    if let Some(index) = args.iter().position(|arg| arg == "--output") {
+        let output = args
+            .get(index + 1)
+            .context("--output requires a JSON path")?;
+        fs::write(output, serialized)?;
+        eprintln!("Page snapshot written to {output}");
+    } else {
+        println!("{serialized}");
+    }
+    Ok(())
+}
+
+fn eval_command(args: &[String]) -> Result<()> {
+    let input = args
+        .get(2)
+        .context("usage: kite-lite eval <page.json> --js <code>")?;
+    let index = args
+        .iter()
+        .position(|arg| arg == "--js")
+        .context("eval requires --js <code>")?;
+    let script = args
+        .get(index + 1)
+        .context("--js requires JavaScript source")?;
+    let page: kite_lite_core::Page = serde_json::from_str(&fs::read_to_string(input)?)?;
+    let result = evaluate_js_in_child(&page, script, JS_TIMEOUT)?;
+    println!("{result}");
+    Ok(())
+}
+
+fn render_command(args: &[String]) -> Result<()> {
+    let input = args
+        .get(2)
+        .context("usage: kite-lite render <page.json> --output page.svg")?;
+    let index = args
+        .iter()
+        .position(|arg| arg == "--output")
+        .context("render requires --output <path>")?;
+    let output = args
+        .get(index + 1)
+        .context("--output requires an SVG path")?;
+    let page: kite_lite_core::Page = serde_json::from_str(&fs::read_to_string(input)?)?;
+    fs::write(output, render_svg(&page, 1024))?;
+    eprintln!("SVG written to {output}");
+    Ok(())
+}
+
+fn serve_command(args: &[String]) -> Result<()> {
+    let address = args.get(2).map(String::as_str).unwrap_or("127.0.0.1:8787");
+    let listener = TcpListener::bind(address)?;
+    eprintln!("kite-lite control API listening on {address}");
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                if let Err(error) = handle_http(stream) {
+                    eprintln!("request error: {error}");
+                }
+            }
+            Err(error) => eprintln!("connection error: {error}"),
+        }
+    }
+    Ok(())
+}
+
+fn cdp_command(args: &[String]) -> Result<()> {
+    let (snapshot, address) = match args.get(2).map(String::as_str) {
+        Some(value) if value.contains(':') => (None, value),
+        snapshot => (
+            snapshot,
+            args.get(3).map(String::as_str).unwrap_or("127.0.0.1:9222"),
+        ),
+    };
+    let page = snapshot
+        .map(|path| -> Result<kite_lite_core::Page> {
+            Ok(serde_json::from_str(&fs::read_to_string(path)?)?)
+        })
+        .transpose()?
+        .unwrap_or_else(|| parse_html("<title>New Page</title><body></body>"));
+    let page = Arc::new(Mutex::new(page));
+    let listener = TcpListener::bind(address)?;
+    eprintln!("kite-lite CDP listening on {address}");
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                let page = page.clone();
+                std::thread::spawn(move || {
+                    if let Err(error) = handle_cdp(stream, page) {
+                        eprintln!("CDP connection error: {error}");
+                    }
+                });
+            }
+            Err(error) => eprintln!("CDP connection error: {error}"),
+        }
+    }
+    Ok(())
+}
+
+fn handle_cdp(stream: TcpStream, page: Arc<Mutex<kite_lite_core::Page>>) -> Result<()> {
+    let mut socket = accept(stream)?;
+    loop {
+        let message = socket.read()?;
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let request: serde_json::Value = serde_json::from_str(text.as_ref())?;
+        let id = request
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let method = request
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let response = cdp_response(id, method, request.get("params"), &page);
+        socket.send(Message::Text(serde_json::to_string(&response)?.into()))?;
+        if (method == "Page.navigate" || method == "Page.reload")
+            && response
+                .get("result")
+                .and_then(|result| result.get("errorText"))
+                .is_none()
+        {
+            for event in [
+                serde_json::json!({
+                    "method": "Page.frameStartedLoading",
+                    "params": {"frameId": "kite-lite-frame"}
+                }),
+                serde_json::json!({
+                    "method": "Page.loadEventFired",
+                    "params": {"timestamp": 0.0}
+                }),
+                serde_json::json!({
+                    "method": "Page.frameStoppedLoading",
+                    "params": {"frameId": "kite-lite-frame"}
+                }),
+            ] {
+                socket.send(Message::Text(serde_json::to_string(&event)?.into()))?;
+            }
+        }
+    }
+}
+
+fn cdp_response(
+    id: serde_json::Value,
+    method: &str,
+    params: Option<&serde_json::Value>,
+    page: &Arc<Mutex<kite_lite_core::Page>>,
+) -> serde_json::Value {
+    let mut page_guard = match page.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return serde_json::json!({
+                "id": id,
+                "error": {"message": "page state unavailable"}
+            });
+        }
+    };
+    let result = match method {
+        "Browser.getVersion" => serde_json::json!({
+            "protocolVersion": "1.3",
+            "product": "KiteLite/0.1.0",
+            "revision": "local",
+            "userAgent": "kite-lite",
+            "jsVersion": "Boa"
+        }),
+        "Runtime.enable" | "Page.enable" | "Network.enable" => serde_json::json!({}),
+        "DOM.enable" => serde_json::json!({}),
+        "DOM.getDocument" => {
+            let mut next_id = 1;
+            serde_json::json!({
+                "root": cdp_node(&page_guard.root, &mut next_id),
+                "backendNodeId": 1
+            })
+        }
+        "DOM.querySelector" => {
+            let selector = params
+                .and_then(|value| value.get("selector"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let mut next_id = 1;
+            let node_id = find_selector(&page_guard.root, selector, &mut next_id).unwrap_or(0);
+            serde_json::json!({"nodeId": node_id})
+        }
+        "DOM.querySelectorAll" => {
+            let selector = params
+                .and_then(|value| value.get("selector"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let mut next_id = 1;
+            let mut node_ids = Vec::new();
+            find_selectors(&page_guard.root, selector, &mut next_id, &mut node_ids);
+            serde_json::json!({"nodeIds": node_ids})
+        }
+        "DOM.getAttributes" => {
+            let node_id = params
+                .and_then(|value| value.get("nodeId"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32;
+            let mut next_id = 1;
+            let attributes = find_node(&page_guard.root, node_id, &mut next_id)
+                .map(|element| {
+                    element
+                        .href
+                        .as_ref()
+                        .map(|href| vec!["href".to_string(), href.clone()])
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            serde_json::json!({"attributes": attributes})
+        }
+        "DOM.getOuterHTML" => {
+            let node_id = params
+                .and_then(|value| value.get("nodeId"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32;
+            let mut next_id = 1;
+            let html = find_node(&page_guard.root, node_id, &mut next_id)
+                .map(element_html)
+                .unwrap_or_default();
+            serde_json::json!({"outerHTML": html})
+        }
+        "Page.getNavigationHistory" => serde_json::json!({
+            "currentIndex": 0,
+            "entries": [{"id": 1, "url": page_guard.url.clone().unwrap_or_else(|| "about:blank".to_string()), "userTypedURL": page_guard.url.clone().unwrap_or_else(|| "about:blank".to_string()), "title": page_guard.title.clone().unwrap_or_default(), "transitionType": "typed"}]
+        }),
+        "Page.getResourceTree" => serde_json::json!({
+            "frameTree": {
+                "frame": {
+                    "id": "kite-lite-frame",
+                    "loaderId": "kite-lite-loader",
+                    "url": page_guard.url.clone().unwrap_or_else(|| "about:blank".to_string()),
+                    "mimeType": "text/html",
+                    "securityOrigin": ""
+                },
+                "resources": []
+            }
+        }),
+        "Page.captureSnapshot" => serde_json::json!({
+            "data": page_guard.source.clone().unwrap_or_default()
+        }),
+        "Page.navigate" => {
+            let url = params
+                .and_then(|value| value.get("url"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            navigate_page(&mut page_guard, url)
+        }
+        "Page.reload" => {
+            let url = page_guard.url.clone().unwrap_or_default();
+            navigate_page(&mut page_guard, &url)
+        }
+        "Runtime.evaluate" => {
+            let expression = params
+                .and_then(|value| value.get("expression"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let page_snapshot = page_guard.clone();
+            drop(page_guard);
+            match evaluate_js_in_child(&page_snapshot, expression, JS_TIMEOUT) {
+                Ok(value) => serde_json::json!({"result": {"type": "string", "value": value}}),
+                Err(error) => serde_json::json!({"exceptionDetails": {"text": error.to_string()}}),
+            }
+        }
+        _ => serde_json::json!({}),
+    };
+    serde_json::json!({"id": id, "result": result})
+}
+
+fn navigate_page(page: &mut kite_lite_core::Page, url: &str) -> serde_json::Value {
+    if url.is_empty() {
+        return serde_json::json!({"errorText": "no URL available for navigation"});
+    }
+    match reqwest::blocking::get(url).and_then(|response| response.error_for_status()) {
+        Ok(response) => match response.text() {
+            Ok(html) => {
+                *page = parse_html(&html);
+                page.url = Some(url.to_string());
+                serde_json::json!({"frameId": "kite-lite-frame", "loaderId": "kite-lite-loader"})
+            }
+            Err(error) => serde_json::json!({"errorText": error.to_string()}),
+        },
+        Err(error) => serde_json::json!({"errorText": error.to_string()}),
+    }
+}
+
+fn cdp_node(element: &kite_lite_core::Element, next_id: &mut u32) -> serde_json::Value {
+    let node_id = *next_id;
+    *next_id += 1;
+    let is_document = element.tag == "document";
+    let children = element
+        .children
+        .iter()
+        .map(|child| cdp_node(child, next_id))
+        .collect::<Vec<_>>();
+    let mut attributes = Vec::new();
+    if let Some(href) = &element.href {
+        attributes.push(serde_json::json!("href"));
+        attributes.push(serde_json::json!(href));
+    }
+    let node_name = if is_document {
+        "#document".to_string()
+    } else {
+        element.tag.to_uppercase()
+    };
+    let local_name = if is_document {
+        String::new()
+    } else {
+        element.tag.clone()
+    };
+    serde_json::json!({
+        "nodeId": node_id,
+        "nodeType": if is_document {9} else {1},
+        "nodeName": node_name,
+        "localName": local_name,
+        "nodeValue": "",
+        "childNodeCount": children.len(),
+        "children": children,
+        "attributes": attributes
+    })
+}
+
+fn find_selector<'a>(
+    element: &'a kite_lite_core::Element,
+    selector: &str,
+    next_id: &mut u32,
+) -> Option<u32> {
+    let current_id = *next_id;
+    *next_id += 1;
+    let matches = selector == "*" || element.tag.eq_ignore_ascii_case(selector);
+    if matches && element.tag != "document" {
+        return Some(current_id);
+    }
+    for child in &element.children {
+        if let Some(node_id) = find_selector(child, selector, next_id) {
+            return Some(node_id);
+        }
+    }
+    None
+}
+
+fn find_selectors(
+    element: &kite_lite_core::Element,
+    selector: &str,
+    next_id: &mut u32,
+    matches: &mut Vec<u32>,
+) {
+    let current_id = *next_id;
+    *next_id += 1;
+    if (selector == "*" || element.tag.eq_ignore_ascii_case(selector)) && element.tag != "document"
+    {
+        matches.push(current_id);
+    }
+    for child in &element.children {
+        find_selectors(child, selector, next_id, matches);
+    }
+}
+
+fn find_node<'a>(
+    element: &'a kite_lite_core::Element,
+    target_id: u32,
+    next_id: &mut u32,
+) -> Option<&'a kite_lite_core::Element> {
+    let current_id = *next_id;
+    *next_id += 1;
+    if current_id == target_id {
+        return Some(element);
+    }
+    for child in &element.children {
+        if let Some(found) = find_node(child, target_id, next_id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn element_html(element: &kite_lite_core::Element) -> String {
+    if element.tag == "document" {
+        return element.children.iter().map(element_html).collect();
+    }
+    let attributes = element
+        .href
+        .as_ref()
+        .map(|href| format!(" href=\"{}\"", html_escape(href)))
+        .unwrap_or_default();
+    let children = element
+        .children
+        .iter()
+        .map(element_html)
+        .collect::<String>();
+    let text = html_escape(&element.text);
+    format!(
+        "<{tag}{attributes}>{text}{children}</{tag}>",
+        tag = element.tag
+    )
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn handle_http(mut stream: TcpStream) -> Result<()> {
+    let mut buffer = vec![0_u8; 2 * 1024 * 1024];
+    let size = stream.read(&mut buffer)?;
+    let request = std::str::from_utf8(&buffer[..size])?;
+    let (headers, body) = request
+        .split_once("\r\n\r\n")
+        .context("malformed HTTP request")?;
+    let mut request_line = headers
+        .lines()
+        .next()
+        .context("missing request line")?
+        .split_whitespace();
+    let method = request_line.next().context("missing HTTP method")?;
+    let path = request_line.next().context("missing HTTP path")?;
+
+    let (status, content_type, payload) = match (method, path) {
+        ("GET", "/health") => (
+            "200 OK",
+            "application/json",
+            r#"{"ok":true,"service":"kite-lite"}"#.to_string(),
+        ),
+        ("POST", "/v1/parse") => {
+            let page = parse_html(body);
+            ("200 OK", "application/json", serde_json::to_string(&page)?)
+        }
+        ("POST", "/v1/render") => {
+            let page: kite_lite_core::Page = serde_json::from_str(body)?;
+            ("200 OK", "image/svg+xml", render_svg(&page, 1024))
+        }
+        ("POST", "/v1/eval") => {
+            let request: EvalRequest = serde_json::from_str(body)?;
+            let value = evaluate_js_in_child(&request.page, &request.script, JS_TIMEOUT)?;
+            (
+                "200 OK",
+                "application/json",
+                serde_json::to_string(&serde_json::json!({"value": value}))?,
+            )
+        }
+        _ => (
+            "404 Not Found",
+            "application/json",
+            r#"{"error":"not found"}"#.to_string(),
+        ),
+    };
+
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        payload.len()
+    );
+    stream.write_all(response.as_bytes())?;
+    Ok(())
+}
+
+async fn run_js_child() -> Result<()> {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let request: EvalRequest = serde_json::from_str(&input)?;
+    let response = match JsRuntime::default().evaluate_page(&request.page, &request.script) {
+        Ok(value) => EvalResponse {
+            value: Some(value),
+            error: None,
+        },
+        Err(error) => EvalResponse {
+            value: None,
+            error: Some(error.to_string()),
+        },
+    };
+    println!("{}", serde_json::to_string(&response)?);
+    Ok(())
+}
+
+fn evaluate_js_in_child(
+    page: &kite_lite_core::Page,
+    script: &str,
+    timeout: Duration,
+) -> Result<String> {
+    let request = serde_json::to_string(&EvalRequest {
+        page: page.clone(),
+        script: script.to_owned(),
+    })?;
+    let executable = env::current_exe()?;
+    let mut child = Command::new(executable)
+        .arg("--eval-js-child")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    child
+        .stdin
+        .take()
+        .context("failed to open JavaScript child stdin")?
+        .write_all(request.as_bytes())?;
+
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            let mut output = String::new();
+            child
+                .stdout
+                .take()
+                .context("failed to open JavaScript child stdout")?
+                .read_to_string(&mut output)?;
+            let response: EvalResponse = serde_json::from_str(&output)
+                .context("JavaScript child returned invalid output")?;
+            return match (response.value, response.error) {
+                (Some(value), _) => Ok(value),
+                (_, Some(error)) => Err(anyhow::anyhow!(error)),
+                _ => Err(anyhow::anyhow!("JavaScript child returned no result")),
+            };
+        }
+        if started.elapsed() >= timeout {
+            child.kill()?;
+            child.wait()?;
+            return Err(anyhow::anyhow!(
+                "JavaScript execution exceeded {} ms",
+                timeout.as_millis()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
