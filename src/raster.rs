@@ -23,10 +23,24 @@ fn load_fonts(fontdb: &mut usvg::fontdb::Database) {
         })
         .is_some();
     if !resolves {
-        let fallback_family = fontdb
+        // Prefer a face that actually looks like a general-purpose sans
+        // font (name contains "sans" but not "mono") over just the first
+        // one enumerated — directory scan order is arbitrary, and e.g.
+        // "DejaVu Sans Mono" is a perfectly loadable face that would
+        // otherwise win by chance and make every heading/paragraph render
+        // in a monospace font.
+        let candidates: Vec<String> = fontdb
             .faces()
-            .next()
-            .and_then(|face| face.families.first().map(|(name, _)| name.clone()));
+            .filter_map(|face| face.families.first().map(|(name, _)| name.clone()))
+            .collect();
+        let fallback_family = candidates
+            .iter()
+            .find(|name| {
+                let lower = name.to_ascii_lowercase();
+                lower.contains("sans") && !lower.contains("mono")
+            })
+            .or_else(|| candidates.first())
+            .cloned();
         if let Some(family) = fallback_family {
             fontdb.set_sans_serif_family(family);
         }
