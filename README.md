@@ -9,10 +9,13 @@ JavaScript aislado, renderizado SVG determinista y una superficie CDP pequeña.
 El núcleo DOM en Rust:
 
 - parsea HTML con un parser compatible con HTML5;
-- extrae título, texto y enlaces en formato JSON;
+- extrae título, texto y enlaces en formato JSON, resolviendo cada enlace
+  relativo a una URL absoluta contra la URL final de la página;
 - mantiene una representación de árbol preparada para añadir CSS, JavaScript y renderizado;
 - evita estado global en parseo y evaluación local;
-- conserva la URL y el HTML fuente dentro de una sesión CDP.
+- conserva la URL final (post-redirecciones) y el HTML fuente dentro de una sesión CDP;
+- mantiene cookies entre navegaciones de una misma sesión (`fetch`/CDP)
+  mediante un cliente HTTP con cookie jar propio.
 
 ## Probarlo
 
@@ -91,7 +94,8 @@ docker run --rm --network=none --read-only --cap-drop=ALL `
 El servidor se enlaza a loopback por defecto y expone:
 
 - `GET /health`
-- `POST /v1/parse` con HTML en el body;
+- `POST /v1/parse` con HTML en el body (los enlaces quedan relativos, ya que
+  este endpoint no recibe una URL base para resolverlos);
 - `POST /v1/render` con un snapshot JSON;
 - `POST /v1/eval` con `{ "page": ..., "script": "..." }`.
 
@@ -120,10 +124,16 @@ serializada. Sin snapshot inicia una página vacía:
 cargo run -- cdp page.json 127.0.0.1:9222
 ```
 
-`Page.navigate` y `Page.reload` descargan HTML con la red del proceso CDP,
-reconstruyen el DOM y actualizan la URL. `Runtime.evaluate` sólo expone un
-snapshot reducido del documento; no proporciona `fetch`, filesystem ni
-bindings del host.
+`Page.navigate` y `Page.reload` descargan HTML con un cliente HTTP persistente
+por sesión CDP (la vida del proceso `cdp` en ejecución), reconstruyen el DOM y
+actualizan la URL con el destino final tras seguir redirecciones — no con la
+URL originalmente solicitada. Las cookies que el sitio establezca (incluso en
+saltos intermedios de una redirección) se guardan en el cookie jar de esa
+sesión y se reenvían en navegaciones posteriores dentro del mismo proceso
+`cdp`, tal como esperaría un agente que necesite, por ejemplo, permanecer
+autenticado entre una página de login y las siguientes. `Runtime.evaluate`
+sólo expone un snapshot reducido del documento; no proporciona `fetch`,
+filesystem ni bindings del host.
 
 Ejemplo conceptual de una llamada CDP:
 
@@ -133,8 +143,10 @@ Ejemplo conceptual de una llamada CDP:
 {"id":3,"method":"DOM.getOuterHTML","params":{"nodeId":6}}
 ```
 
-La implementación todavía no ofrece layout real, eventos de entrada, cookies,
-captura PNG/PDF, ejecución de scripts de la página ni eventos de red.
+La implementación todavía no ofrece layout real, eventos de entrada, captura
+PNG/PDF, ejecución de scripts de la página ni eventos de red. Tampoco modela
+múltiples pestañas/targets: cada proceso `cdp` sirve un único `Page`
+compartido por todas las conexiones WebSocket que se le hagan.
 
 ## Despliegue en VPS
 
@@ -154,8 +166,7 @@ autenticación. No se recomienda exponerlo directamente a Internet.
 
 ## Próximas capas
 
-1. resolver URLs, cookies y redirecciones por sesión;
-2. agregar estilos computados y layout mínimos;
-3. implementar interacción DOM y eventos de entrada;
-4. renderizar a PNG/PDF;
-5. ampliar la compatibilidad con Playwright/MCP.
+1. agregar estilos computados y layout mínimos;
+2. implementar interacción DOM y eventos de entrada;
+3. renderizar a PNG/PDF;
+4. ampliar la compatibilidad con Playwright/MCP.

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use kite_lite_core::{parse_html, render_svg, EvalRequest, EvalResponse};
+use kite_lite_core::{parse_html, render_svg, resolve_links, EvalRequest, EvalResponse};
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -38,8 +38,8 @@ async fn main() -> Result<()> {
     let url = args
         .get(1)
         .context("usage: kite-lite <url> [--svg output.svg] [--js code]")?;
-    let html = reqwest::get(url).await?.error_for_status()?.text().await?;
-    let page = parse_html(&html);
+    let client = http_client()?;
+    let page = fetch_page(&client, url).await?;
 
     if let Some(index) = args.iter().position(|arg| arg == "--svg") {
         let output = args
@@ -61,12 +61,26 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn http_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder().cookie_store(true).build()?)
+}
+
+async fn fetch_page(client: &reqwest::Client, url: &str) -> Result<kite_lite_core::Page> {
+    let response = client.get(url).send().await?.error_for_status()?;
+    let final_url = response.url().to_string();
+    let html = response.text().await?;
+    let mut page = parse_html(&html);
+    page.url = Some(final_url.clone());
+    resolve_links(&mut page, &final_url);
+    Ok(page)
+}
+
 async fn fetch_command(args: &[String]) -> Result<()> {
     let url = args
         .get(2)
         .context("usage: kite-lite fetch <url> [--output page.json]")?;
-    let html = reqwest::get(url).await?.error_for_status()?.text().await?;
-    let page = parse_html(&html);
+    let client = http_client()?;
+    let page = fetch_page(&client, url).await?;
     let serialized = serde_json::to_string_pretty(&page)?;
     if let Some(index) = args.iter().position(|arg| arg == "--output") {
         let output = args
@@ -131,6 +145,16 @@ fn serve_command(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Bundles a page with a persistent HTTP client so cookies set by one
+/// navigation (and any redirect hops along the way) are carried over to
+/// the next `Page.navigate`/`Page.reload` within the same `cdp` session —
+/// "session" here meaning the lifetime of this `cdp` server process, since
+/// it only ever tracks a single page/target.
+struct CdpSession {
+    page: kite_lite_core::Page,
+    client: reqwest::blocking::Client,
+}
+
 fn cdp_command(args: &[String]) -> Result<()> {
     let (snapshot, address) = match args.get(2).map(String::as_str) {
         Some(value) if value.parse::<std::net::SocketAddr>().is_ok() => (None, value),
@@ -145,15 +169,24 @@ fn cdp_command(args: &[String]) -> Result<()> {
         })
         .transpose()?
         .unwrap_or_else(|| parse_html("<title>New Page</title><body></body>"));
-    let page = Arc::new(Mutex::new(page));
+    // `cdp_command` runs synchronously inside the #[tokio::main] runtime
+    // (main() calls it directly, before any std::thread::spawn). Building a
+    // reqwest::blocking::Client spins up its own inner runtime, which panics
+    // if attempted directly on a tokio worker thread — block_in_place hands
+    // this thread off so that's safe.
+    let client = tokio::task::block_in_place(|| {
+        reqwest::blocking::Client::builder().cookie_store(true).build()
+    })?;
+    let session = CdpSession { page, client };
+    let session = Arc::new(Mutex::new(session));
     let listener = TcpListener::bind(address)?;
     eprintln!("kite-lite CDP listening on {address}");
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let page = page.clone();
+                let session = session.clone();
                 std::thread::spawn(move || {
-                    if let Err(error) = handle_cdp(stream, page) {
+                    if let Err(error) = handle_cdp(stream, session) {
                         eprintln!("CDP connection error: {error}");
                     }
                 });
@@ -164,7 +197,7 @@ fn cdp_command(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn handle_cdp(stream: TcpStream, page: Arc<Mutex<kite_lite_core::Page>>) -> Result<()> {
+fn handle_cdp(stream: TcpStream, session: Arc<Mutex<CdpSession>>) -> Result<()> {
     let mut socket = accept(stream)?;
     loop {
         let message = socket.read()?;
@@ -180,7 +213,7 @@ fn handle_cdp(stream: TcpStream, page: Arc<Mutex<kite_lite_core::Page>>) -> Resu
             .get("method")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
-        let response = cdp_response(id, method, request.get("params"), &page);
+        let response = cdp_response(id, method, request.get("params"), &session);
         socket.send(Message::Text(serde_json::to_string(&response)?.into()))?;
         if (method == "Page.navigate" || method == "Page.reload")
             && response
@@ -212,9 +245,9 @@ fn cdp_response(
     id: serde_json::Value,
     method: &str,
     params: Option<&serde_json::Value>,
-    page: &Arc<Mutex<kite_lite_core::Page>>,
+    session: &Arc<Mutex<CdpSession>>,
 ) -> serde_json::Value {
-    let mut page_guard = match page.lock() {
+    let mut session_guard = match session.lock() {
         Ok(guard) => guard,
         Err(_) => {
             return serde_json::json!({
@@ -236,7 +269,7 @@ fn cdp_response(
         "DOM.getDocument" => {
             let mut next_id = 1;
             serde_json::json!({
-                "root": cdp_node(&page_guard.root, &mut next_id),
+                "root": cdp_node(&session_guard.page.root, &mut next_id),
                 "backendNodeId": 1
             })
         }
@@ -246,7 +279,8 @@ fn cdp_response(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
             let mut next_id = 1;
-            let node_id = find_selector(&page_guard.root, selector, &mut next_id).unwrap_or(0);
+            let node_id =
+                find_selector(&session_guard.page.root, selector, &mut next_id).unwrap_or(0);
             serde_json::json!({"nodeId": node_id})
         }
         "DOM.querySelectorAll" => {
@@ -256,7 +290,7 @@ fn cdp_response(
                 .unwrap_or_default();
             let mut next_id = 1;
             let mut node_ids = Vec::new();
-            find_selectors(&page_guard.root, selector, &mut next_id, &mut node_ids);
+            find_selectors(&session_guard.page.root, selector, &mut next_id, &mut node_ids);
             serde_json::json!({"nodeIds": node_ids})
         }
         "DOM.getAttributes" => {
@@ -265,7 +299,7 @@ fn cdp_response(
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0) as u32;
             let mut next_id = 1;
-            let attributes = find_node(&page_guard.root, node_id, &mut next_id)
+            let attributes = find_node(&session_guard.page.root, node_id, &mut next_id)
                 .map(|element| {
                     element
                         .href
@@ -282,21 +316,21 @@ fn cdp_response(
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0) as u32;
             let mut next_id = 1;
-            let html = find_node(&page_guard.root, node_id, &mut next_id)
+            let html = find_node(&session_guard.page.root, node_id, &mut next_id)
                 .map(element_html)
                 .unwrap_or_default();
             serde_json::json!({"outerHTML": html})
         }
         "Page.getNavigationHistory" => serde_json::json!({
             "currentIndex": 0,
-            "entries": [{"id": 1, "url": page_guard.url.clone().unwrap_or_else(|| "about:blank".to_string()), "userTypedURL": page_guard.url.clone().unwrap_or_else(|| "about:blank".to_string()), "title": page_guard.title.clone().unwrap_or_default(), "transitionType": "typed"}]
+            "entries": [{"id": 1, "url": session_guard.page.url.clone().unwrap_or_else(|| "about:blank".to_string()), "userTypedURL": session_guard.page.url.clone().unwrap_or_else(|| "about:blank".to_string()), "title": session_guard.page.title.clone().unwrap_or_default(), "transitionType": "typed"}]
         }),
         "Page.getResourceTree" => serde_json::json!({
             "frameTree": {
                 "frame": {
                     "id": "kite-lite-frame",
                     "loaderId": "kite-lite-loader",
-                    "url": page_guard.url.clone().unwrap_or_else(|| "about:blank".to_string()),
+                    "url": session_guard.page.url.clone().unwrap_or_else(|| "about:blank".to_string()),
                     "mimeType": "text/html",
                     "securityOrigin": ""
                 },
@@ -304,26 +338,26 @@ fn cdp_response(
             }
         }),
         "Page.captureSnapshot" => serde_json::json!({
-            "data": page_guard.source.clone().unwrap_or_default()
+            "data": session_guard.page.source.clone().unwrap_or_default()
         }),
         "Page.navigate" => {
             let url = params
                 .and_then(|value| value.get("url"))
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            navigate_page(&mut page_guard, url)
+            navigate_page(&mut session_guard, url)
         }
         "Page.reload" => {
-            let url = page_guard.url.clone().unwrap_or_default();
-            navigate_page(&mut page_guard, &url)
+            let url = session_guard.page.url.clone().unwrap_or_default();
+            navigate_page(&mut session_guard, &url)
         }
         "Runtime.evaluate" => {
             let expression = params
                 .and_then(|value| value.get("expression"))
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            let page_snapshot = page_guard.clone();
-            drop(page_guard);
+            let page_snapshot = session_guard.page.clone();
+            drop(session_guard);
             match evaluate_js_in_child(&page_snapshot, expression, JS_TIMEOUT) {
                 Ok(value) => serde_json::json!({"result": {"type": "string", "value": value}}),
                 Err(error) => serde_json::json!({"exceptionDetails": {"text": error.to_string()}}),
@@ -334,19 +368,29 @@ fn cdp_response(
     serde_json::json!({"id": id, "result": result})
 }
 
-fn navigate_page(page: &mut kite_lite_core::Page, url: &str) -> serde_json::Value {
+fn navigate_page(session: &mut CdpSession, url: &str) -> serde_json::Value {
     if url.is_empty() {
         return serde_json::json!({"errorText": "no URL available for navigation"});
     }
-    match reqwest::blocking::get(url).and_then(|response| response.error_for_status()) {
-        Ok(response) => match response.text() {
-            Ok(html) => {
-                *page = parse_html(&html);
-                page.url = Some(url.to_string());
-                serde_json::json!({"frameId": "kite-lite-frame", "loaderId": "kite-lite-loader"})
+    match session
+        .client
+        .get(url)
+        .send()
+        .and_then(|response| response.error_for_status())
+    {
+        Ok(response) => {
+            let final_url = response.url().to_string();
+            match response.text() {
+                Ok(html) => {
+                    let mut page = parse_html(&html);
+                    page.url = Some(final_url.clone());
+                    resolve_links(&mut page, &final_url);
+                    session.page = page;
+                    serde_json::json!({"frameId": "kite-lite-frame", "loaderId": "kite-lite-loader"})
+                }
+                Err(error) => serde_json::json!({"errorText": error.to_string()}),
             }
-            Err(error) => serde_json::json!({"errorText": error.to_string()}),
-        },
+        }
         Err(error) => serde_json::json!({"errorText": error.to_string()}),
     }
 }
@@ -650,10 +694,20 @@ mod tests {
         assert_eq!(child["attributes"], serde_json::json!(["href", "/docs"]));
     }
 
+    fn test_session(page: kite_lite_core::Page) -> Arc<Mutex<CdpSession>> {
+        Arc::new(Mutex::new(CdpSession {
+            page,
+            client: reqwest::blocking::Client::new(),
+        }))
+    }
+
     #[test]
     fn navigate_page_rejects_empty_url() {
-        let mut page = parse_html("<title>T</title>");
-        let result = navigate_page(&mut page, "");
+        let mut session = CdpSession {
+            page: parse_html("<title>T</title>"),
+            client: reqwest::blocking::Client::new(),
+        };
+        let result = navigate_page(&mut session, "");
         assert_eq!(
             result,
             serde_json::json!({"errorText": "no URL available for navigation"})
@@ -662,8 +716,8 @@ mod tests {
 
     #[test]
     fn cdp_response_reports_browser_version() {
-        let page = Arc::new(Mutex::new(parse_html("<title>T</title>")));
-        let response = cdp_response(serde_json::json!(1), "Browser.getVersion", None, &page);
+        let session = test_session(parse_html("<title>T</title>"));
+        let response = cdp_response(serde_json::json!(1), "Browser.getVersion", None, &session);
         assert_eq!(response["id"], serde_json::json!(1));
         assert_eq!(response["result"]["product"], "KiteLite/0.1.0");
     }
@@ -672,12 +726,12 @@ mod tests {
     fn cdp_response_reports_navigation_history() {
         let mut page = parse_html("<title>Example</title>");
         page.url = Some("https://example.com".to_string());
-        let page = Arc::new(Mutex::new(page));
+        let session = test_session(page);
         let response = cdp_response(
             serde_json::json!(2),
             "Page.getNavigationHistory",
             None,
-            &page,
+            &session,
         );
         let entry = &response["result"]["entries"][0];
         assert_eq!(entry["url"], "https://example.com");
@@ -686,28 +740,26 @@ mod tests {
 
     #[test]
     fn cdp_response_captures_snapshot_source() {
-        let page = Arc::new(Mutex::new(parse_html("<title>Example</title>")));
-        let response = cdp_response(serde_json::json!(3), "Page.captureSnapshot", None, &page);
+        let session = test_session(parse_html("<title>Example</title>"));
+        let response = cdp_response(serde_json::json!(3), "Page.captureSnapshot", None, &session);
         assert_eq!(response["result"]["data"], "<title>Example</title>");
     }
 
     #[test]
     fn cdp_response_defaults_to_empty_result_for_unknown_method() {
-        let page = Arc::new(Mutex::new(parse_html("<title>Example</title>")));
-        let response = cdp_response(serde_json::json!(4), "Nonexistent.method", None, &page);
+        let session = test_session(parse_html("<title>Example</title>"));
+        let response = cdp_response(serde_json::json!(4), "Nonexistent.method", None, &session);
         assert_eq!(response["result"], serde_json::json!({}));
     }
 
     #[test]
     fn cdp_finds_selector_and_returns_matching_outer_html() {
-        let page = Arc::new(Mutex::new(parse_html(
-            "<title>T</title><body><h1>Hello</h1></body>",
-        )));
+        let session = test_session(parse_html("<title>T</title><body><h1>Hello</h1></body>"));
         let select = cdp_response(
             serde_json::json!(5),
             "DOM.querySelector",
             Some(&serde_json::json!({"selector": "h1"})),
-            &page,
+            &session,
         );
         let node_id = select["result"]["nodeId"].as_u64().unwrap();
         assert!(node_id > 0);
@@ -716,21 +768,21 @@ mod tests {
             serde_json::json!(6),
             "DOM.getOuterHTML",
             Some(&serde_json::json!({"nodeId": node_id})),
-            &page,
+            &session,
         );
         assert_eq!(outer["result"]["outerHTML"], "<h1>Hello</h1>");
     }
 
     #[test]
     fn cdp_finds_all_matching_selectors() {
-        let page = Arc::new(Mutex::new(parse_html(
+        let session = test_session(parse_html(
             "<title>T</title><body><p>One</p><p>Two</p></body>",
-        )));
+        ));
         let select_all = cdp_response(
             serde_json::json!(7),
             "DOM.querySelectorAll",
             Some(&serde_json::json!({"selector": "p"})),
-            &page,
+            &session,
         );
         let node_ids = select_all["result"]["nodeIds"].as_array().unwrap();
         assert_eq!(node_ids.len(), 2);

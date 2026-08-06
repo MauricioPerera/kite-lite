@@ -43,6 +43,32 @@ pub struct EvalResponse {
 pub use js::{JsRuntime, JsValueResult};
 pub use render::render_svg;
 
+/// Rewrites every relative link (`page.links` and each `Element.href`) into
+/// an absolute URL resolved against `base`. Hrefs that fail to parse (e.g.
+/// `mailto:`, `javascript:`, or a malformed `base`) are left untouched.
+pub fn resolve_links(page: &mut Page, base: &str) {
+    let Ok(base_url) = url::Url::parse(base) else {
+        return;
+    };
+    for link in &mut page.links {
+        if let Ok(resolved) = base_url.join(link) {
+            *link = resolved.to_string();
+        }
+    }
+    resolve_element_hrefs(&mut page.root, &base_url);
+}
+
+fn resolve_element_hrefs(element: &mut Element, base: &url::Url) {
+    if let Some(href) = &element.href {
+        if let Ok(resolved) = base.join(href) {
+            element.href = Some(resolved.to_string());
+        }
+    }
+    for child in &mut element.children {
+        resolve_element_hrefs(child, base);
+    }
+}
+
 pub fn parse_html(source: &str) -> Page {
     let dom = parse_document(RcDom::default(), Default::default()).one(source.to_owned());
     let root = element_from_handle(&dom.document);
@@ -150,7 +176,7 @@ fn normalize_text(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_html;
+    use super::{parse_html, resolve_links, Element};
 
     #[test]
     fn extracts_agent_useful_page_data() {
@@ -159,6 +185,50 @@ mod tests {
         );
         assert_eq!(page.title.as_deref(), Some("Example"));
         assert!(page.text.contains("Hello"));
+        assert_eq!(page.links, vec!["/docs"]);
+    }
+
+    fn collect_hrefs(element: &Element, hrefs: &mut Vec<String>) {
+        if let Some(href) = &element.href {
+            hrefs.push(href.clone());
+        }
+        for child in &element.children {
+            collect_hrefs(child, hrefs);
+        }
+    }
+
+    #[test]
+    fn resolves_relative_links_against_base_url() {
+        let mut page = parse_html(
+            r#"<a href="/docs">Docs</a><a href="page2.html">Page2</a><a href="https://other.example/x">Abs</a>"#,
+        );
+        resolve_links(&mut page, "https://example.com/dir/index.html");
+
+        assert_eq!(
+            page.links,
+            vec![
+                "https://example.com/docs",
+                "https://example.com/dir/page2.html",
+                "https://other.example/x",
+            ]
+        );
+
+        let mut hrefs = Vec::new();
+        collect_hrefs(&page.root, &mut hrefs);
+        assert_eq!(
+            hrefs,
+            vec![
+                "https://example.com/docs",
+                "https://example.com/dir/page2.html",
+                "https://other.example/x",
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_links_ignores_unparseable_base() {
+        let mut page = parse_html(r#"<a href="/docs">Docs</a>"#);
+        resolve_links(&mut page, "not a url");
         assert_eq!(page.links, vec!["/docs"]);
     }
 }
