@@ -150,7 +150,7 @@ fn serve_command(args: &[String]) -> Result<()> {
 
 fn cdp_command(args: &[String]) -> Result<()> {
     let (snapshot, address) = match args.get(2).map(String::as_str) {
-        Some(value) if value.contains(':') => (None, value),
+        Some(value) if value.parse::<std::net::SocketAddr>().is_ok() => (None, value),
         snapshot => (
             snapshot,
             args.get(3).map(String::as_str).unwrap_or("127.0.0.1:9222"),
