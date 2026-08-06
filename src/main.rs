@@ -609,3 +609,164 @@ fn evaluate_js_in_child(
         std::thread::sleep(Duration::from_millis(5));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_escape_escapes_reserved_characters() {
+        assert_eq!(
+            html_escape("<a> & \"b\""),
+            "&lt;a&gt; &amp; &quot;b&quot;"
+        );
+    }
+
+    #[test]
+    fn element_html_includes_escaped_href_and_text() {
+        let element = kite_lite_core::Element {
+            tag: "a".to_string(),
+            text: "Link & more".to_string(),
+            href: Some("/x?a=1&b=2".to_string()),
+            children: Vec::new(),
+        };
+        assert_eq!(
+            element_html(&element),
+            "<a href=\"/x?a=1&amp;b=2\">Link &amp; more</a>"
+        );
+    }
+
+    #[test]
+    fn element_html_flattens_document_children() {
+        let root = kite_lite_core::Element {
+            tag: "document".to_string(),
+            text: String::new(),
+            href: None,
+            children: vec![
+                kite_lite_core::Element {
+                    tag: "p".to_string(),
+                    text: "One".to_string(),
+                    href: None,
+                    children: Vec::new(),
+                },
+                kite_lite_core::Element {
+                    tag: "p".to_string(),
+                    text: "Two".to_string(),
+                    href: None,
+                    children: Vec::new(),
+                },
+            ],
+        };
+        assert_eq!(element_html(&root), "<p>One</p><p>Two</p>");
+    }
+
+    #[test]
+    fn cdp_node_builds_expected_json_shape() {
+        let root = kite_lite_core::Element {
+            tag: "document".to_string(),
+            text: String::new(),
+            href: None,
+            children: vec![kite_lite_core::Element {
+                tag: "a".to_string(),
+                text: "Docs".to_string(),
+                href: Some("/docs".to_string()),
+                children: Vec::new(),
+            }],
+        };
+        let mut next_id = 1;
+        let node = cdp_node(&root, &mut next_id);
+        assert_eq!(node["nodeType"], 9);
+        assert_eq!(node["nodeName"], "#document");
+        assert_eq!(node["childNodeCount"], 1);
+        let child = &node["children"][0];
+        assert_eq!(child["nodeName"], "A");
+        assert_eq!(child["localName"], "a");
+        assert_eq!(child["attributes"], serde_json::json!(["href", "/docs"]));
+    }
+
+    #[test]
+    fn navigate_page_rejects_empty_url() {
+        let mut page = parse_html("<title>T</title>");
+        let result = navigate_page(&mut page, "");
+        assert_eq!(
+            result,
+            serde_json::json!({"errorText": "no URL available for navigation"})
+        );
+    }
+
+    #[test]
+    fn cdp_response_reports_browser_version() {
+        let page = Arc::new(Mutex::new(parse_html("<title>T</title>")));
+        let response = cdp_response(serde_json::json!(1), "Browser.getVersion", None, &page);
+        assert_eq!(response["id"], serde_json::json!(1));
+        assert_eq!(response["result"]["product"], "KiteLite/0.1.0");
+    }
+
+    #[test]
+    fn cdp_response_reports_navigation_history() {
+        let mut page = parse_html("<title>Example</title>");
+        page.url = Some("https://example.com".to_string());
+        let page = Arc::new(Mutex::new(page));
+        let response = cdp_response(
+            serde_json::json!(2),
+            "Page.getNavigationHistory",
+            None,
+            &page,
+        );
+        let entry = &response["result"]["entries"][0];
+        assert_eq!(entry["url"], "https://example.com");
+        assert_eq!(entry["title"], "Example");
+    }
+
+    #[test]
+    fn cdp_response_captures_snapshot_source() {
+        let page = Arc::new(Mutex::new(parse_html("<title>Example</title>")));
+        let response = cdp_response(serde_json::json!(3), "Page.captureSnapshot", None, &page);
+        assert_eq!(response["result"]["data"], "<title>Example</title>");
+    }
+
+    #[test]
+    fn cdp_response_defaults_to_empty_result_for_unknown_method() {
+        let page = Arc::new(Mutex::new(parse_html("<title>Example</title>")));
+        let response = cdp_response(serde_json::json!(4), "Nonexistent.method", None, &page);
+        assert_eq!(response["result"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn cdp_finds_selector_and_returns_matching_outer_html() {
+        let page = Arc::new(Mutex::new(parse_html(
+            "<title>T</title><body><h1>Hello</h1></body>",
+        )));
+        let select = cdp_response(
+            serde_json::json!(5),
+            "DOM.querySelector",
+            Some(&serde_json::json!({"selector": "h1"})),
+            &page,
+        );
+        let node_id = select["result"]["nodeId"].as_u64().unwrap();
+        assert!(node_id > 0);
+
+        let outer = cdp_response(
+            serde_json::json!(6),
+            "DOM.getOuterHTML",
+            Some(&serde_json::json!({"nodeId": node_id})),
+            &page,
+        );
+        assert_eq!(outer["result"]["outerHTML"], "<h1>Hello</h1>");
+    }
+
+    #[test]
+    fn cdp_finds_all_matching_selectors() {
+        let page = Arc::new(Mutex::new(parse_html(
+            "<title>T</title><body><p>One</p><p>Two</p></body>",
+        )));
+        let select_all = cdp_response(
+            serde_json::json!(7),
+            "DOM.querySelectorAll",
+            Some(&serde_json::json!({"selector": "p"})),
+            &page,
+        );
+        let node_ids = select_all["result"]["nodeIds"].as_array().unwrap();
+        assert_eq!(node_ids.len(), 2);
+    }
+}
