@@ -8,7 +8,7 @@ RUN cargo build --release --locked
 # Small, non-root runtime image.
 FROM debian:trixie-slim
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y ca-certificates \
+    && apt-get install --no-install-recommends -y ca-certificates fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 kite
 COPY --from=builder /build/target/release/kite-lite /usr/local/bin/kite-lite

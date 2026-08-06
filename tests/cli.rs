@@ -114,6 +114,31 @@ fn render_writes_svg_file() {
     assert!(svg.contains("Hello"));
 }
 
+#[test]
+fn render_writes_png_and_pdf_files_by_output_extension() {
+    let page = write_sample_page("render-page-raster.json");
+
+    let png_path = temp_file("render-page.png");
+    let _png_guard = TempPath(png_path.clone());
+    let output = Command::new(bin_path())
+        .args(["render", page.0.to_str().unwrap(), "--output", png_path.to_str().unwrap()])
+        .output()
+        .expect("failed to run kite-lite render (png)");
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let png_bytes = std::fs::read(&png_path).expect("png output missing");
+    assert_eq!(&png_bytes[..8], b"\x89PNG\r\n\x1a\n");
+
+    let pdf_path = temp_file("render-page.pdf");
+    let _pdf_guard = TempPath(pdf_path.clone());
+    let output = Command::new(bin_path())
+        .args(["render", page.0.to_str().unwrap(), "--output", pdf_path.to_str().unwrap()])
+        .output()
+        .expect("failed to run kite-lite render (pdf)");
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let pdf_bytes = std::fs::read(&pdf_path).expect("pdf output missing");
+    assert_eq!(&pdf_bytes[..5], b"%PDF-");
+}
+
 fn find_element_by_tag<'a>(element: &'a serde_json::Value, tag: &str) -> Option<&'a serde_json::Value> {
     if element["tag"] == tag {
         return Some(element);
@@ -142,6 +167,32 @@ fn http_request(port: u16, method: &str, path: &str, body: &str) -> (String, Str
         .expect("malformed HTTP response");
     let status = headers.lines().next().unwrap_or_default().to_string();
     (status, body.to_string())
+}
+
+/// Like `http_request`, but reads the response as raw bytes instead of
+/// UTF-8 text, for endpoints that can return binary payloads (PNG/PDF).
+fn http_request_bytes(port: u16, method: &str, path: &str, body: &str) -> (String, Vec<u8>) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("failed to connect");
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .expect("failed to send request");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .expect("failed to read response");
+    let separator = b"\r\n\r\n";
+    let split_at = response
+        .windows(separator.len())
+        .position(|window| window == separator)
+        .expect("malformed HTTP response");
+    let headers = String::from_utf8_lossy(&response[..split_at]).into_owned();
+    let status = headers.lines().next().unwrap_or_default().to_string();
+    let payload = response[split_at + separator.len()..].to_vec();
+    (status, payload)
 }
 
 #[test]
@@ -180,6 +231,14 @@ fn serve_exposes_health_parse_render_and_eval() {
     let (status, body) = http_request(port, "POST", "/v1/render", sample_page);
     assert!(status.contains("200"), "status: {status}");
     assert!(body.starts_with("<svg"));
+
+    let (status, body) = http_request_bytes(port, "POST", "/v1/render?format=png", sample_page);
+    assert!(status.contains("200"), "status: {status}");
+    assert_eq!(&body[..8], b"\x89PNG\r\n\x1a\n");
+
+    let (status, body) = http_request_bytes(port, "POST", "/v1/render?format=pdf", sample_page);
+    assert!(status.contains("200"), "status: {status}");
+    assert_eq!(&body[..5], b"%PDF-");
 
     let eval_body = format!(r#"{{"page":{sample_page},"script":"document.title"}}"#);
     let (status, body) = http_request(port, "POST", "/v1/eval", &eval_body);

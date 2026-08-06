@@ -21,7 +21,8 @@ El núcleo DOM en Rust:
   (tamaños/negrita de h1-h6, márgenes de p/li/blockquote), con ajuste de
   texto (word wrap) — ver la sección "Layout mínimo" para las limitaciones;
   permite click/escritura/submit de formularios por CDP sin ejecutar JS de
-  la página — ver "Interacción: click, escritura y submit de formularios".
+  la página — ver "Interacción: click, escritura y submit de formularios";
+  renderiza a PNG y PDF además de SVG — ver "Renderizado PNG/PDF".
 
 ## Probarlo
 
@@ -29,13 +30,21 @@ El núcleo DOM en Rust:
 cargo test
 cargo run -- https://example.com
 cargo run -- https://example.com --svg example.svg --js "1 + 2"
+cargo run -- https://example.com --png example.png
+cargo run -- https://example.com --pdf example.pdf
 cargo run -- fetch https://example.com --output page.json
 cargo run -- eval page.json --js "document.title"
 cargo run -- render page.json --output page.svg
+cargo run -- render page.json --output page.png
+cargo run -- render page.json --output page.pdf
 cargo run -- serve 127.0.0.1:8787
 cargo run -- cdp page.json 127.0.0.1:9222
 cargo run -- cdp 127.0.0.1:9222
 ```
+
+`render` (and `POST /v1/render`, via `?format=png|pdf|svg`) picks the output
+format from the `--output` path's extension (`.svg` is the default for
+anything else).
 
 `--js` evaluates a script in a fresh Boa JavaScript context with no filesystem,
 network, or host bindings. The page snapshot exposes `document.title`,
@@ -124,6 +133,28 @@ Esto **no es un motor de CSS**:
   vertical;
 - no hay colapso de márgenes ni floats ni posicionamiento.
 
+## Renderizado PNG/PDF
+
+`render_svg` se puede rasterizar a PNG (`resvg` + `tiny-skia`, Rust puro, sin
+depender de un navegador ni de herramientas externas) y ese PNG se puede
+envolver en un PDF de una sola página (`printpdf`).
+
+Esto **necesita fuentes instaladas en el sistema donde corre el binario**:
+todo lo que dibuja `render_svg` es texto (no hay rectángulos, imágenes ni
+otros gráficos), y el rasterizador usa `fontdb::load_system_fonts()` — no
+trae ninguna fuente embebida. Sin fuentes, el PNG/PDF sale con el texto
+faltante (el resto de los elementos, al no existir, tampoco aparece). La
+imagen Docker instala `fonts-dejavu-core` para esto; en un build local fuera
+de Docker, depende de que el sistema operativo tenga alguna fuente
+disponible.
+
+El PDF **no es vectorial**: es la imagen PNG rasterizada, envuelta en una
+página PDF a 96 DPI — no hay texto seleccionable ni buscable. Un PDF
+vectorial de verdad necesitaría su propio pipeline de fuentes independiente
+del rasterizado (`printpdf` trae soporte nativo de SVG, pero internamente
+usa una versión vieja de `usvg` con `Options::default()` sin fuentes
+cargadas y sin forma de inyectar una — no es viable para texto).
+
 ## Control API local
 
 El servidor se enlaza a loopback por defecto y expone:
@@ -131,7 +162,8 @@ El servidor se enlaza a loopback por defecto y expone:
 - `GET /health`
 - `POST /v1/parse` con HTML en el body (los enlaces quedan relativos, ya que
   este endpoint no recibe una URL base para resolverlos);
-- `POST /v1/render` con un snapshot JSON;
+- `POST /v1/render` con un snapshot JSON — `?format=svg` (default), `png` o
+  `pdf`;
 - `POST /v1/eval` con `{ "page": ..., "script": "..." }`.
 
 No se debe publicar directamente a Internet; colócalo detrás de autenticación
@@ -180,10 +212,11 @@ Ejemplo conceptual de una llamada CDP:
 {"id":3,"method":"DOM.getOuterHTML","params":{"nodeId":6}}
 ```
 
-La implementación todavía no ofrece captura PNG/PDF, ejecución de scripts de
-la página ni eventos de red. Tampoco modela múltiples pestañas/targets: cada
-proceso `cdp` sirve un único `Page` compartido por todas las conexiones
-WebSocket que se le hagan.
+La implementación todavía no ofrece captura PNG/PDF vía CDP (usá `render` o
+`/v1/render?format=png|pdf` para eso — ver "Renderizado PNG/PDF"), ejecución
+de scripts de la página ni eventos de red. Tampoco modela múltiples
+pestañas/targets: cada proceso `cdp` sirve un único `Page` compartido por
+todas las conexiones WebSocket que se le hagan.
 
 ## Interacción: click, escritura y submit de formularios
 
@@ -233,5 +266,4 @@ autenticación. No se recomienda exponerlo directamente a Internet.
 
 ## Próximas capas
 
-1. renderizar a PNG/PDF;
-2. ampliar la compatibilidad con Playwright/MCP.
+1. ampliar la compatibilidad con Playwright/MCP.

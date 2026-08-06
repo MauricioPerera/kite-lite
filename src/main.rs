@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
-use kite_lite_core::{compute_layout, parse_html, render_svg, resolve_links, EvalRequest, EvalResponse};
+use kite_lite_core::{
+    compute_layout, parse_html, render_pdf, render_png, render_svg, resolve_links, EvalRequest,
+    EvalResponse,
+};
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -41,9 +44,9 @@ async fn main() -> Result<()> {
         return cdp_command(&args);
     }
 
-    let url = args
-        .get(1)
-        .context("usage: kite-lite <url> [--svg output.svg] [--js code]")?;
+    let url = args.get(1).context(
+        "usage: kite-lite <url> [--svg|--png|--pdf output] [--js code]",
+    )?;
     let client = http_client()?;
     let page = fetch_page(&client, url).await?;
 
@@ -53,6 +56,22 @@ async fn main() -> Result<()> {
             .context("--svg requires an output path")?;
         fs::write(output, render_svg(&page, 1024))?;
         eprintln!("SVG written to {output}");
+    }
+
+    if let Some(index) = args.iter().position(|arg| arg == "--png") {
+        let output = args
+            .get(index + 1)
+            .context("--png requires an output path")?;
+        fs::write(output, render_png(&page, 1024)?)?;
+        eprintln!("PNG written to {output}");
+    }
+
+    if let Some(index) = args.iter().position(|arg| arg == "--pdf") {
+        let output = args
+            .get(index + 1)
+            .context("--pdf requires an output path")?;
+        fs::write(output, render_pdf(&page, 1024)?)?;
+        eprintln!("PDF written to {output}");
     }
 
     if let Some(index) = args.iter().position(|arg| arg == "--js") {
@@ -121,17 +140,27 @@ fn eval_command(args: &[String]) -> Result<()> {
 fn render_command(args: &[String]) -> Result<()> {
     let input = args
         .get(2)
-        .context("usage: kite-lite render <page.json> --output page.svg")?;
+        .context("usage: kite-lite render <page.json> --output page.{svg,png,pdf}")?;
     let index = args
         .iter()
         .position(|arg| arg == "--output")
         .context("render requires --output <path>")?;
     let output = args
         .get(index + 1)
-        .context("--output requires an SVG path")?;
+        .context("--output requires a path ending in .svg, .png, or .pdf")?;
     let page: kite_lite_core::Page = serde_json::from_str(&fs::read_to_string(input)?)?;
-    fs::write(output, render_svg(&page, 1024))?;
-    eprintln!("SVG written to {output}");
+    let extension = std::path::Path::new(output)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("svg")
+        .to_ascii_lowercase();
+    let (bytes, format): (Vec<u8>, &str) = match extension.as_str() {
+        "png" => (render_png(&page, 1024)?, "PNG"),
+        "pdf" => (render_pdf(&page, 1024)?, "PDF"),
+        _ => (render_svg(&page, 1024).into_bytes(), "SVG"),
+    };
+    fs::write(output, bytes)?;
+    eprintln!("{format} written to {output}");
     Ok(())
 }
 
@@ -785,22 +814,35 @@ fn handle_http(mut stream: TcpStream) -> Result<()> {
         .context("missing request line")?
         .split_whitespace();
     let method = request_line.next().context("missing HTTP method")?;
-    let path = request_line.next().context("missing HTTP path")?;
+    let full_path = request_line.next().context("missing HTTP path")?;
+    let (path, query) = full_path.split_once('?').unwrap_or((full_path, ""));
 
-    let (status, content_type, payload) = match (method, path) {
+    let (status, content_type, payload): (&str, &str, Vec<u8>) = match (method, path) {
         ("GET", "/health") => (
             "200 OK",
             "application/json",
-            r#"{"ok":true,"service":"kite-lite"}"#.to_string(),
+            br#"{"ok":true,"service":"kite-lite"}"#.to_vec(),
         ),
         ("POST", "/v1/parse") => {
             let mut page = parse_html(body);
             compute_layout(&mut page, DEFAULT_VIEWPORT_WIDTH);
-            ("200 OK", "application/json", serde_json::to_string(&page)?)
+            ("200 OK", "application/json", serde_json::to_vec(&page)?)
         }
         ("POST", "/v1/render") => {
             let page: kite_lite_core::Page = serde_json::from_str(body)?;
-            ("200 OK", "image/svg+xml", render_svg(&page, 1024))
+            let format = url::form_urlencoded::parse(query.as_bytes())
+                .find(|(key, _)| key == "format")
+                .map(|(_, value)| value.into_owned())
+                .unwrap_or_else(|| "svg".to_string());
+            match format.as_str() {
+                "png" => ("200 OK", "image/png", render_png(&page, 1024)?),
+                "pdf" => ("200 OK", "application/pdf", render_pdf(&page, 1024)?),
+                _ => (
+                    "200 OK",
+                    "image/svg+xml",
+                    render_svg(&page, 1024).into_bytes(),
+                ),
+            }
         }
         ("POST", "/v1/eval") => {
             let request: EvalRequest = serde_json::from_str(body)?;
@@ -808,21 +850,22 @@ fn handle_http(mut stream: TcpStream) -> Result<()> {
             (
                 "200 OK",
                 "application/json",
-                serde_json::to_string(&serde_json::json!({"value": value}))?,
+                serde_json::to_vec(&serde_json::json!({"value": value}))?,
             )
         }
         _ => (
             "404 Not Found",
             "application/json",
-            r#"{"error":"not found"}"#.to_string(),
+            br#"{"error":"not found"}"#.to_vec(),
         ),
     };
 
-    let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+    let header = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         payload.len()
     );
-    stream.write_all(response.as_bytes())?;
+    stream.write_all(header.as_bytes())?;
+    stream.write_all(&payload)?;
     Ok(())
 }
 

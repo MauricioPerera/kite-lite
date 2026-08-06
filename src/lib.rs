@@ -1,5 +1,6 @@
 mod js;
 mod layout;
+mod raster;
 mod render;
 
 use html5ever::{parse_document, tendril::TendrilSink};
@@ -74,6 +75,7 @@ pub struct EvalResponse {
 
 pub use js::{JsRuntime, JsValueResult};
 pub use layout::compute_layout;
+pub use raster::{render_pdf, render_png};
 pub use render::render_svg;
 
 /// Rewrites every relative link (`page.links` and each `Element.href`) into
