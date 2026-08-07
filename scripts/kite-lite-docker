@@ -1,0 +1,15 @@
+#!/bin/sh
+# Runs kite-lite via the built `kite-lite:dev` Docker image instead of a
+# local binary, using the resource limits measured in README's "Recursos
+# minimos". Point the demo scripts at it when there's no local build:
+#
+#   KITE_LITE_BIN=scripts/kite-lite-docker python scripts/eval_sandbox.py ...
+#
+# For scripts that need to reach a mock server on localhost (webmcp_router.py,
+# llm_benchmark.py), add --network host below — it's left out by default
+# since it widens the container's network access.
+exec docker run --rm -i \
+  --memory=32m --cpus=0.2 --pids-limit=16 \
+  --cap-drop=ALL --security-opt=no-new-privileges \
+  --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+  kite-lite:dev "$@"
