@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use kite_lite_core::{
-    compute_layout, lint_a11y, lint_social, lint_webmcp, parse_html, render_pdf, render_png,
-    render_svg, resolve_links, A11ySeverity, EvalRequest, EvalResponse, SocialSeverity,
-    WebMcpLintSeverity,
+    compute_layout, lint_a11y, lint_seo, lint_social, lint_webmcp, parse_html, render_pdf,
+    render_png, render_svg, resolve_links, A11ySeverity, EvalRequest, EvalResponse, SeoSeverity,
+    SocialSeverity, WebMcpLintSeverity,
 };
 use std::env;
 use std::fs;
@@ -54,6 +54,10 @@ async fn main() -> Result<()> {
 
     if args.get(1).map(String::as_str) == Some("social-lint") {
         return social_lint_command(&args).await;
+    }
+
+    if args.get(1).map(String::as_str) == Some("seo-lint") {
+        return seo_lint_command(&args).await;
     }
 
     if args.get(1).map(String::as_str) == Some("serve") {
@@ -331,6 +335,42 @@ async fn social_lint_command(args: &[String]) -> Result<()> {
     let error_count = findings.iter().filter(|f| f.severity == SocialSeverity::Error).count();
     if error_count > 0 {
         anyhow::bail!("{error_count} error(es) de preview social encontrados");
+    }
+    Ok(())
+}
+
+/// Checks a page against a handful of practical on-page SEO rules — see
+/// `kite_lite_core::seo::lint`. Deliberately doesn't repeat a11y-lint's
+/// heading checks. Same `<url|page.json|file.html>` convention as the
+/// other linters. Exits non-zero on any `Error`-severity finding (today:
+/// missing title, or an explicit noindex).
+async fn seo_lint_command(args: &[String]) -> Result<()> {
+    let target = args
+        .get(2)
+        .context("usage: kite-lite seo-lint <url|page.json|file.html> [--json]")?;
+    let json_output = args.iter().any(|arg| arg == "--json");
+
+    let page = load_page_target(target).await?;
+    let findings = lint_seo(&page);
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&findings)?);
+    } else if findings.is_empty() {
+        println!("Sin hallazgos: no se detectaron problemas basicos de SEO.");
+    } else {
+        for finding in &findings {
+            let label = match finding.severity {
+                SeoSeverity::Error => "ERROR",
+                SeoSeverity::Warning => "WARN ",
+                SeoSeverity::Info => "INFO ",
+            };
+            println!("[{label}] {}", finding.message);
+        }
+    }
+
+    let error_count = findings.iter().filter(|f| f.severity == SeoSeverity::Error).count();
+    if error_count > 0 {
+        anyhow::bail!("{error_count} error(es) de SEO encontrados");
     }
     Ok(())
 }

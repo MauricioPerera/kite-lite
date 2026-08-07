@@ -423,6 +423,25 @@ Esto requirió que kite-lite empiece a capturar `<meta>` del `<head>`
 (`Page.meta`), que antes se descartaba por completo junto con el resto
 del `<head>`.
 
+### Auditor de SEO on-page
+
+`kite-lite seo-lint <url|page.json|archivo.html> [--json]` — cuarto
+hermano de los linters, para SEO básico. No repite los chequeos de
+encabezados de `a11y-lint` (múltiples `<h1>`, saltos de nivel).
+
+```bash
+cargo run -- seo-lint ./mi-pagina.html
+cargo run -- seo-lint https://mi-sitio.com
+```
+
+- **Error**: falta `<title>` por completo; `<meta name="robots">`
+  incluye `noindex` (la página está explícitamente excluida de la
+  indexación — fácil de olvidar prendido en producción).
+- **Warning**: `<title>` fuera de 10-60 caracteres; sin
+  `<meta name="description">`; descripción fuera de 50-160 caracteres;
+  sin ningún `<h1>` en la página.
+- **Info**: la página tiene menos de 200 palabras (contenido delgado).
+
 ## Despliegue en VPS
 
 El despliegue probado usa una imagen multi-stage y un usuario sin privilegios:

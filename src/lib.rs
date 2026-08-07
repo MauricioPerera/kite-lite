@@ -3,6 +3,7 @@ mod js;
 mod layout;
 mod raster;
 mod render;
+mod seo;
 mod social;
 mod webmcp;
 
@@ -121,6 +122,7 @@ pub struct EvalResponse {
 pub use a11y::{lint as lint_a11y, A11yFinding, Severity as A11ySeverity};
 pub use js::{JsRuntime, JsValueResult};
 pub use social::{lint as lint_social, Severity as SocialSeverity, SocialFinding, SocialPreview};
+pub use seo::{lint as lint_seo, SeoFinding, Severity as SeoSeverity};
 pub use layout::compute_layout;
 pub use raster::{render_pdf, render_png};
 pub use render::render_svg;

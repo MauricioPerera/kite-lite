@@ -1235,3 +1235,76 @@ fn social_lint_works_against_a_live_url() {
     assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
     assert!(String::from_utf8_lossy(&output.stdout).contains("Home"));
 }
+
+#[test]
+fn seo_lint_reports_error_and_exits_nonzero_for_noindex() {
+    let html = write_html(
+        "seo-noindex.html",
+        r#"<html><head><title>Hi</title><meta name="robots" content="noindex"></head><body><p>Poco.</p></body></html>"#,
+    );
+
+    let output = Command::new(bin_path())
+        .args(["seo-lint", html.0.to_str().unwrap()])
+        .output()
+        .expect("failed to run kite-lite seo-lint");
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("noindex"), "{stdout}");
+    assert!(stdout.contains("muy corto"), "{stdout}");
+    assert!(stdout.contains("no hay ningun <h1>"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error(es)"), "{stderr}");
+}
+
+#[test]
+fn seo_lint_exits_zero_for_a_well_formed_local_file() {
+    let html = write_html(
+        "seo-clean.html",
+        &format!(
+            r#"<html><head><title>Un titulo de longitud razonable</title>
+                 <meta name="description" content="Una descripcion de longitud razonable que describe bien el contenido de la pagina para buscadores.">
+               </head><body><h1>Titulo</h1><p>{}</p></body></html>"#,
+            "palabra ".repeat(250)
+        ),
+    );
+
+    let output = Command::new(bin_path())
+        .args(["seo-lint", html.0.to_str().unwrap()])
+        .output()
+        .expect("failed to run kite-lite seo-lint");
+
+    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Sin hallazgos"));
+}
+
+#[test]
+fn seo_lint_json_output_is_parseable() {
+    let html = write_html("seo-json.html", "<title>Hi</title>");
+
+    let output = Command::new(bin_path())
+        .args(["seo-lint", html.0.to_str().unwrap(), "--json"])
+        .output()
+        .expect("failed to run kite-lite seo-lint");
+
+    assert!(output.status.success());
+    let findings: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json output is not valid JSON");
+    let findings = findings.as_array().expect("expected a JSON array");
+    assert!(findings.iter().any(|f| f["severity"] == "warning"));
+}
+
+#[test]
+fn seo_lint_works_against_a_live_url() {
+    let port = 19041;
+    spawn_interaction_server(port);
+    wait_for_port(port);
+
+    let output = Command::new(bin_path())
+        .args(["seo-lint", &format!("http://127.0.0.1:{port}/")])
+        .output()
+        .expect("failed to run kite-lite seo-lint");
+
+    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("muy corto"));
+}
