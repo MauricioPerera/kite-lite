@@ -1,3 +1,4 @@
+mod a11y;
 mod js;
 mod layout;
 mod raster;
@@ -71,6 +72,15 @@ pub struct Element {
     /// only ever simulates a GET.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
+    /// The `alt` attribute (any tag, only meaningful on `<img>`): `None`
+    /// means the attribute is missing entirely (an accessibility problem),
+    /// distinct from `Some(String::new())` (`alt=""`, valid for decorative
+    /// images).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt: Option<String>,
+    /// The `lang` attribute (checked on the document's `<html>` element).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -99,6 +109,7 @@ pub struct EvalResponse {
     pub error: Option<String>,
 }
 
+pub use a11y::{lint as lint_a11y, A11yFinding, Severity as A11ySeverity};
 pub use js::{JsRuntime, JsValueResult};
 pub use layout::compute_layout;
 pub use raster::{render_pdf, render_png};
@@ -167,6 +178,8 @@ struct ParsedAttrs {
     tool_param_description: Option<String>,
     required: bool,
     method: Option<String>,
+    alt: Option<String>,
+    lang: Option<String>,
 }
 
 fn element_from_handle(handle: &Handle) -> Element {
@@ -196,6 +209,8 @@ fn element_from_handle(handle: &Handle) -> Element {
                 tool_param_description: attr("toolparamdescription"),
                 required: has_attr("required"),
                 method: attr("method"),
+                alt: attr("alt"),
+                lang: attr("lang"),
             }
         }
         NodeData::Document => ParsedAttrs { tag: "document".to_string(), ..Default::default() },
@@ -218,6 +233,8 @@ fn element_from_handle(handle: &Handle) -> Element {
             tool_param_description: attrs.tool_param_description,
             required: attrs.required,
             method: attrs.method,
+            alt: attrs.alt,
+            lang: attrs.lang,
         };
     }
 
@@ -259,6 +276,8 @@ fn element_from_handle(handle: &Handle) -> Element {
         tool_param_description: attrs.tool_param_description,
         required: attrs.required,
         method: attrs.method,
+        alt: attrs.alt,
+        lang: attrs.lang,
     }
 }
 

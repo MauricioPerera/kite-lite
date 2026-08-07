@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use kite_lite_core::{
-    compute_layout, lint_webmcp, parse_html, render_pdf, render_png, render_svg, resolve_links,
-    EvalRequest, EvalResponse, WebMcpLintSeverity,
+    compute_layout, lint_a11y, lint_webmcp, parse_html, render_pdf, render_png, render_svg,
+    resolve_links, A11ySeverity, EvalRequest, EvalResponse, WebMcpLintSeverity,
 };
 use std::env;
 use std::fs;
@@ -45,6 +45,10 @@ async fn main() -> Result<()> {
 
     if args.get(1).map(String::as_str) == Some("webmcp-lint") {
         return webmcp_lint_command(&args).await;
+    }
+
+    if args.get(1).map(String::as_str) == Some("a11y-lint") {
+        return a11y_lint_command(&args).await;
     }
 
     if args.get(1).map(String::as_str) == Some("serve") {
@@ -190,6 +194,19 @@ fn render_command(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Resolves a `<url|page.json|file.html>` CLI argument (the shared input
+/// convention for `webmcp-lint` and `a11y-lint`) into a `Page`.
+async fn load_page_target(target: &str) -> Result<kite_lite_core::Page> {
+    if target.starts_with("http://") || target.starts_with("https://") {
+        let client = http_client()?;
+        fetch_page(&client, target).await
+    } else if target.ends_with(".json") {
+        Ok(serde_json::from_str(&fs::read_to_string(target)?)?)
+    } else {
+        Ok(parse_html(&fs::read_to_string(target)?))
+    }
+}
+
 /// Checks a page's declarative WebMCP forms (`toolname`/`tooldescription`/...)
 /// against a handful of practical rules — see `kite_lite_core::webmcp::lint`
 /// for what's checked. `target` can be a live URL, an already-fetched
@@ -201,14 +218,7 @@ async fn webmcp_lint_command(args: &[String]) -> Result<()> {
         .context("usage: kite-lite webmcp-lint <url|page.json|file.html> [--json]")?;
     let json_output = args.iter().any(|arg| arg == "--json");
 
-    let page = if target.starts_with("http://") || target.starts_with("https://") {
-        let client = http_client()?;
-        fetch_page(&client, target).await?
-    } else if target.ends_with(".json") {
-        serde_json::from_str(&fs::read_to_string(target)?)?
-    } else {
-        parse_html(&fs::read_to_string(target)?)
-    };
+    let page = load_page_target(target).await?;
 
     let findings = lint_webmcp(&page);
 
@@ -235,6 +245,43 @@ async fn webmcp_lint_command(args: &[String]) -> Result<()> {
         .count();
     if error_count > 0 {
         anyhow::bail!("{error_count} error(es) de WebMCP declarativo encontrados");
+    }
+    Ok(())
+}
+
+/// Checks a page against a handful of practical accessibility rules — see
+/// `kite_lite_core::a11y::lint` for what's checked. `target` uses the same
+/// `<url|page.json|file.html>` convention as `webmcp-lint`. Exits non-zero
+/// when any `Error`-severity finding turns up, so it's usable as a CI gate
+/// (today every rule is `Warning`, so it always exits 0 — kept for parity
+/// with `webmcp-lint` and future rules that do warrant a hard failure).
+async fn a11y_lint_command(args: &[String]) -> Result<()> {
+    let target = args
+        .get(2)
+        .context("usage: kite-lite a11y-lint <url|page.json|file.html> [--json]")?;
+    let json_output = args.iter().any(|arg| arg == "--json");
+
+    let page = load_page_target(target).await?;
+    let findings = lint_a11y(&page);
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&findings)?);
+    } else if findings.is_empty() {
+        println!("Sin hallazgos: no se detectaron problemas de accesibilidad.");
+    } else {
+        for finding in &findings {
+            let label = match finding.severity {
+                A11ySeverity::Error => "ERROR",
+                A11ySeverity::Warning => "WARN ",
+                A11ySeverity::Info => "INFO ",
+            };
+            println!("[{label}] {}", finding.message);
+        }
+    }
+
+    let error_count = findings.iter().filter(|f| f.severity == A11ySeverity::Error).count();
+    if error_count > 0 {
+        anyhow::bail!("{error_count} error(es) de accesibilidad encontrados");
     }
     Ok(())
 }

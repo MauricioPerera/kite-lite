@@ -375,6 +375,28 @@ Chequeos, de más a menos grave:
 No reemplaza probarlo en un navegador real con WebMCP activo — es un
 chequeo rápido y local de los errores más comunes antes de llegar ahí.
 
+### Linter de accesibilidad (a11y)
+
+`kite-lite a11y-lint <url|page.json|archivo.html> [--json]` — mismo
+formato de entrada y salida que `webmcp-lint`, pero para un puñado de
+reglas de accesibilidad prácticas, no una auditoría WCAG completa:
+
+```bash
+cargo run -- a11y-lint ./mi-pagina.html
+cargo run -- a11y-lint https://mi-sitio.com
+```
+
+Reglas, todas `Warning` hoy (el comando sale con código 0 aunque haya
+hallazgos — la separación por severidad ya está lista para cuando haga
+falta una regla que sí deba romper el build):
+
+- `<img>` sin atributo `alt` (`alt=""` para decorativas no cuenta como
+  falta).
+- `<a>` sin texto y sin una imagen descendiente con `alt` no vacío.
+- Más de un `<h1>` en la página.
+- Salto de nivel de encabezado (`<h1>` seguido de `<h3>` sin `<h2>`).
+- `<html>` sin atributo `lang`.
+
 ## Despliegue en VPS
 
 El despliegue probado usa una imagen multi-stage y un usuario sin privilegios:

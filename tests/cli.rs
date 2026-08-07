@@ -1070,3 +1070,80 @@ fn webmcp_lint_works_against_a_live_url() {
     assert!(stdout.contains("model"), "{stdout}");
     assert!(stdout.contains("toolparamdescription"), "{stdout}");
 }
+
+#[test]
+fn a11y_lint_reports_warnings_for_a_broken_local_file() {
+    let html = write_html(
+        "a11y-broken.html",
+        r#"<html><body>
+             <h1>Titulo</h1><h1>Otro</h1><h3>Salta un nivel</h3>
+             <img src="foto.jpg">
+             <a href="/x"></a>
+           </body></html>"#,
+    );
+
+    let output = Command::new(bin_path())
+        .args(["a11y-lint", html.0.to_str().unwrap()])
+        .output()
+        .expect("failed to run kite-lite a11y-lint");
+
+    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("sin atributo 'alt'"), "{stdout}");
+    assert!(stdout.contains("sin atributo 'lang'"), "{stdout}");
+    assert!(stdout.contains("sin texto ni imagen"), "{stdout}");
+    assert!(stdout.contains("2 elementos <h1>"), "{stdout}");
+    assert!(stdout.contains("salto de nivel"), "{stdout}");
+}
+
+#[test]
+fn a11y_lint_exits_zero_for_a_well_formed_local_file() {
+    let html = write_html(
+        "a11y-clean.html",
+        r#"<html lang="es"><body>
+             <h1>Titulo</h1><h2>Subtitulo</h2>
+             <img src="foto.jpg" alt="una foto">
+             <a href="/x">Ir a x</a>
+           </body></html>"#,
+    );
+
+    let output = Command::new(bin_path())
+        .args(["a11y-lint", html.0.to_str().unwrap()])
+        .output()
+        .expect("failed to run kite-lite a11y-lint");
+
+    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Sin hallazgos"));
+}
+
+#[test]
+fn a11y_lint_json_output_is_parseable() {
+    let html = write_html("a11y-json.html", r#"<html><body><img src="x.png"></body></html>"#);
+
+    let output = Command::new(bin_path())
+        .args(["a11y-lint", html.0.to_str().unwrap(), "--json"])
+        .output()
+        .expect("failed to run kite-lite a11y-lint");
+
+    assert!(output.status.success());
+    let findings: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json output is not valid JSON");
+    let findings = findings.as_array().expect("expected a JSON array");
+    assert_eq!(findings.len(), 2, "{findings:?}"); // missing alt + missing lang
+    assert!(findings.iter().all(|f| f["severity"] == "warning"));
+}
+
+#[test]
+fn a11y_lint_works_against_a_live_url() {
+    let port = 19039;
+    spawn_interaction_server(port);
+    wait_for_port(port);
+
+    let output = Command::new(bin_path())
+        .args(["a11y-lint", &format!("http://127.0.0.1:{port}/")])
+        .output()
+        .expect("failed to run kite-lite a11y-lint");
+
+    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("lang"));
+}
