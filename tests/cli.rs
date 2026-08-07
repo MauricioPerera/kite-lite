@@ -675,3 +675,81 @@ fn click_navigates_and_form_submit_sends_field_values() {
     );
     assert_eq!(title_after_submit["result"]["result"]["value"], "Results: rust");
 }
+
+#[test]
+fn cdp_serves_json_discovery_endpoints() {
+    let port = 18926;
+    let child = Command::new(bin_path())
+        .args(["cdp", &format!("127.0.0.1:{port}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to start kite-lite cdp");
+    let _guard = ChildGuard(child);
+    wait_for_port(port);
+
+    let (status, body) = http_request(port, "GET", "/json/version", "");
+    assert!(status.contains("200"), "status: {status}");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).expect("invalid /json/version JSON");
+    let ws_url = parsed["webSocketDebuggerUrl"]
+        .as_str()
+        .expect("missing webSocketDebuggerUrl");
+    assert!(ws_url.starts_with("ws://"), "unexpected ws url: {ws_url}");
+
+    let (status, body) = http_request(port, "GET", "/json/list", "");
+    assert!(status.contains("200"), "status: {status}");
+    let targets: serde_json::Value = serde_json::from_str(&body).expect("invalid /json/list JSON");
+    assert_eq!(targets.as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn cdp_auto_attach_emits_session_and_sessions_get_echoed() {
+    let port = 18927;
+    let child = Command::new(bin_path())
+        .args(["cdp", &format!("127.0.0.1:{port}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to start kite-lite cdp");
+    let _guard = ChildGuard(child);
+    wait_for_port(port);
+
+    let (mut socket, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}/"))
+        .expect("failed to connect CDP websocket");
+
+    let ack = send_cdp(
+        &mut socket,
+        1,
+        "Target.setAutoAttach",
+        serde_json::json!({"autoAttach": true, "waitForDebuggerOnStart": false}),
+    );
+    assert_eq!(ack["id"], 1);
+
+    let attached = read_json_message(&mut socket);
+    assert_eq!(attached["method"], "Target.attachedToTarget");
+    let session_id = attached["params"]["sessionId"]
+        .as_str()
+        .expect("missing sessionId")
+        .to_string();
+    assert!(!session_id.is_empty());
+
+    // A command sent with that sessionId attached should get it echoed
+    // back on the response, the way a real CDP client expects to route
+    // page-level responses to the right session.
+    socket
+        .send(tungstenite::Message::Text(
+            serde_json::json!({
+                "id": 2,
+                "sessionId": session_id,
+                "method": "Runtime.evaluate",
+                "params": {"expression": "1 + 1"}
+            })
+            .to_string()
+            .into(),
+        ))
+        .expect("failed to send session-scoped Runtime.evaluate");
+    let response = read_json_message(&mut socket);
+    assert_eq!(response["sessionId"], session_id);
+    assert_eq!(response["result"]["result"]["value"], "2");
+}

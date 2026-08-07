@@ -182,9 +182,14 @@ DevTools Protocol:
 - `DOM.getDocument`, `DOM.querySelector`, `DOM.querySelectorAll`;
 - `DOM.getOuterHTML`, `DOM.getAttributes`, `DOM.getBoxModel`;
 - `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`;
+- `Target.getTargets`, `Target.getTargetInfo`, `Target.attachToTarget`,
+  `Target.attachToBrowserTarget`, `Target.setAutoAttach`,
+  `Target.setDiscoverTargets`, `Target.closeTarget`,
+  `Target.disposeBrowserContext` — un solo target fijo, sin multi-pestaña
+  real (ver "Compatibilidad CDP" más abajo);
 - eventos básicos `Page.frameStartedLoading`, `Page.loadEventFired` y
   `Page.frameStoppedLoading` (se disparan tanto tras `Page.navigate`/`reload`
-  como tras un click que termina navegando).
+  como tras un click que termina navegando), y `Target.attachedToTarget`.
 
 Ejecuta `cdp` con un snapshot JSON para iniciar una sesión desde una página
 serializada. Sin snapshot inicia una página vacía:
@@ -214,9 +219,32 @@ Ejemplo conceptual de una llamada CDP:
 
 La implementación todavía no ofrece captura PNG/PDF vía CDP (usá `render` o
 `/v1/render?format=png|pdf` para eso — ver "Renderizado PNG/PDF"), ejecución
-de scripts de la página ni eventos de red. Tampoco modela múltiples
-pestañas/targets: cada proceso `cdp` sirve un único `Page` compartido por
-todas las conexiones WebSocket que se le hagan.
+de scripts de la página ni eventos de red.
+
+## Compatibilidad CDP
+
+El servidor `cdp` expone, en el mismo puerto, tanto el WebSocket como los
+endpoints HTTP de descubrimiento que Chrome real expone en su puerto de
+remote-debugging (`GET /json/version`, `GET /json`, `GET /json/list`) —
+los mismos que herramientas genéricas (`chrome-remote-interface`, scripts
+que arrancan pidiendo `webSocketDebuggerUrl`, etc.) consultan antes de
+conectar el WebSocket. También implementa lo mínimo del dominio `Target`
+(`getTargets`, `attachToTarget`, `setAutoAttach`, ...) para que un cliente
+que espera el flujo real de CDP (adjuntarse a un target antes de operar
+sobre él, y que cada respuesta/evento de página lleve `sessionId`) no se
+quede esperando algo que nunca llega — pero es un solo target fijo,
+simulado: no hay múltiples pestañas/targets reales, `attachToTarget`
+siempre devuelve el mismo `sessionId` y sigue siendo el único `Page`
+compartido por todas las conexiones WebSocket, como ya se explica arriba.
+
+**Esto NO habilita Playwright real.** `playwright.chromium.connectOverCDP()`
+podría llegar a conectar y adjuntarse gracias a esto, pero cada acción de
+Playwright (`page.click()`, `page.fill()`, `locator()`) ejecuta JavaScript
+inyectado contra un DOM vivo (vía `Runtime.callFunctionOn`) para chequear
+visibilidad/scroll/actionability antes de actuar — eso exige exactamente el
+DOM↔JS enlazado y persistente que este proyecto evita a propósito (ver
+"Interacción" y "Layout mínimo" para el porqué). No se intentó simular eso;
+haría creer que funciona hasta el primer click real.
 
 ## Interacción: click, escritura y submit de formularios
 
@@ -266,4 +294,7 @@ autenticación. No se recomienda exponerlo directamente a Internet.
 
 ## Próximas capas
 
-1. ampliar la compatibilidad con Playwright/MCP.
+1. exponer kite-lite como servidor MCP (herramientas tipo `fetch_page`,
+   `click`, `type`, `render_png`, `eval`) — viable sin tocar la arquitectura
+   de aislamiento JS, a diferencia de Playwright real (ver "Compatibilidad
+   CDP" para el porqué de esa distinción).

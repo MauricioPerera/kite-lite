@@ -19,6 +19,13 @@ const JS_TIMEOUT: Duration = Duration::from_millis(1500);
 /// it's actually asked to render, so this default only affects the layout
 /// data exposed directly in a page's JSON.
 const DEFAULT_VIEWPORT_WIDTH: f64 = 1024.0;
+/// Fixed id for the CDP session (attached to *the* one target this project
+/// ever tracks) and for that target itself. Real Chrome mints these
+/// per-connection/per-target; kite-lite only ever has one page, so a
+/// constant is enough for a client to treat every attach as talking to the
+/// same target — no actual multi-target routing exists.
+const CDP_SESSION_ID: &str = "kite-lite-session";
+const CDP_TARGET_ID: &str = "kite-lite-target";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -229,7 +236,7 @@ fn cdp_command(args: &[String]) -> Result<()> {
             Ok(stream) => {
                 let session = session.clone();
                 std::thread::spawn(move || {
-                    if let Err(error) = handle_cdp(stream, session) {
+                    if let Err(error) = handle_cdp_connection(stream, session) {
                         eprintln!("CDP connection error: {error}");
                     }
                 });
@@ -237,6 +244,86 @@ fn cdp_command(args: &[String]) -> Result<()> {
             Err(error) => eprintln!("CDP connection error: {error}"),
         }
     }
+    Ok(())
+}
+
+/// Routes an incoming TCP connection on the `cdp` port to either the plain
+/// HTTP discovery endpoints (`/json*`, the same ones real Chrome exposes on
+/// its remote-debugging port so tools can find the WebSocket URL without
+/// already knowing it) or the CDP WebSocket handler, by peeking at the
+/// request without consuming it — `handle_cdp`'s WebSocket handshake still
+/// needs to read those same bytes fresh if this turns out not to be a
+/// `/json*` request.
+fn handle_cdp_connection(stream: TcpStream, session: Arc<Mutex<CdpSession>>) -> Result<()> {
+    let mut peek_buf = [0_u8; 1024];
+    let peeked = stream.peek(&mut peek_buf)?;
+    let first_line = String::from_utf8_lossy(&peek_buf[..peeked])
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+
+    if first_line.starts_with("GET /json") {
+        return handle_cdp_http_discovery(stream, &session);
+    }
+    handle_cdp(stream, session)
+}
+
+/// Serves the `/json/version`, `/json`, and `/json/list` endpoints that
+/// tools use to discover the WebSocket debugger URL from a plain HTTP
+/// request — the same discovery flow real Chrome's remote-debugging port
+/// supports, and what most CDP client libraries (`connectOverCDP`-style
+/// APIs, `chrome-remote-interface`, etc.) try first.
+fn handle_cdp_http_discovery(mut stream: TcpStream, session: &Arc<Mutex<CdpSession>>) -> Result<()> {
+    let mut buffer = vec![0_u8; 8192];
+    let size = stream.read(&mut buffer)?;
+    let request = std::str::from_utf8(&buffer[..size])?;
+    let mut lines = request.lines();
+    let path = lines
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/");
+    let host = lines
+        .find_map(|line| {
+            line.split_once(':').and_then(|(name, value)| {
+                name.eq_ignore_ascii_case("host").then(|| value.trim().to_string())
+            })
+        })
+        .unwrap_or_else(|| "127.0.0.1:9222".to_string());
+    let ws_url = format!("ws://{host}/");
+
+    let (title, url) = match session.lock() {
+        Ok(guard) => (
+            guard.page.title.clone().unwrap_or_default(),
+            guard.page.url.clone().unwrap_or_else(|| "about:blank".to_string()),
+        ),
+        Err(_) => (String::new(), "about:blank".to_string()),
+    };
+
+    let body = match path {
+        "/json/version" => serde_json::json!({
+            "Browser": "kite-lite/0.1.0",
+            "Protocol-Version": "1.3",
+            "User-Agent": "kite-lite",
+            "V8-Version": "0.0.0",
+            "WebKit-Version": "0.0.0",
+            "webSocketDebuggerUrl": ws_url
+        }),
+        "/json" | "/json/list" => serde_json::json!([{
+            "id": CDP_TARGET_ID,
+            "type": "page",
+            "title": title,
+            "url": url,
+            "webSocketDebuggerUrl": ws_url
+        }]),
+        _ => serde_json::json!({"error": "not found"}),
+    };
+    let payload = serde_json::to_string(&body)?;
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        payload.len()
+    );
+    stream.write_all(response.as_bytes())?;
     Ok(())
 }
 
@@ -256,8 +343,22 @@ fn handle_cdp(stream: TcpStream, session: Arc<Mutex<CdpSession>>) -> Result<()> 
             .get("method")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
-        let response = cdp_response(id, method, request.get("params"), &session);
+        // Real CDP scopes every page-level command/response/event to the
+        // sessionId a client got back from Target.attachToTarget. kite-lite
+        // only has one target, so there's no real routing to do — we just
+        // echo whatever sessionId the client attached the message with, so
+        // clients that (correctly) expect one don't discard our responses.
+        let incoming_session_id = request
+            .get("sessionId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+
+        let mut response = cdp_response(id, method, request.get("params"), &session);
+        if let Some(session_id) = &incoming_session_id {
+            response["sessionId"] = serde_json::json!(session_id);
+        }
         socket.send(Message::Text(serde_json::to_string(&response)?.into()))?;
+
         // A navigation may come from Page.navigate/Page.reload directly, or
         // indirectly from clicking a link/submitting a form via
         // Input.dispatchMouseEvent — detect it by the response shape
@@ -269,7 +370,7 @@ fn handle_cdp(stream: TcpStream, session: Arc<Mutex<CdpSession>>) -> Result<()> 
             .and_then(|result| result.get("frameId"))
             .is_some()
         {
-            for event in [
+            for mut event in [
                 serde_json::json!({
                     "method": "Page.frameStartedLoading",
                     "params": {"frameId": "kite-lite-frame"}
@@ -283,8 +384,33 @@ fn handle_cdp(stream: TcpStream, session: Arc<Mutex<CdpSession>>) -> Result<()> 
                     "params": {"frameId": "kite-lite-frame"}
                 }),
             ] {
+                if let Some(session_id) = &incoming_session_id {
+                    event["sessionId"] = serde_json::json!(session_id);
+                }
                 socket.send(Message::Text(serde_json::to_string(&event)?.into()))?;
             }
+        }
+
+        let auto_attach = method == "Target.setAutoAttach"
+            && request
+                .get("params")
+                .and_then(|params| params.get("autoAttach"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+        if method == "Target.attachToTarget" || auto_attach {
+            let target = match session.lock() {
+                Ok(guard) => target_info(&guard.page),
+                Err(_) => continue,
+            };
+            let attached_event = serde_json::json!({
+                "method": "Target.attachedToTarget",
+                "params": {
+                    "sessionId": CDP_SESSION_ID,
+                    "targetInfo": target,
+                    "waitingForDebugger": false
+                }
+            });
+            socket.send(Message::Text(serde_json::to_string(&attached_event)?.into()))?;
         }
     }
 }
@@ -314,6 +440,15 @@ fn cdp_response(
         }),
         "Runtime.enable" | "Page.enable" | "Network.enable" => serde_json::json!({}),
         "DOM.enable" => serde_json::json!({}),
+        "Target.setDiscoverTargets" | "Target.setAutoAttach" | "Target.disposeBrowserContext" => {
+            serde_json::json!({})
+        }
+        "Target.getTargets" => serde_json::json!({ "targetInfos": [target_info(&session_guard.page)] }),
+        "Target.getTargetInfo" => serde_json::json!({ "targetInfo": target_info(&session_guard.page) }),
+        "Target.attachToTarget" | "Target.attachToBrowserTarget" => {
+            serde_json::json!({ "sessionId": CDP_SESSION_ID })
+        }
+        "Target.closeTarget" => serde_json::json!({ "success": true }),
         "DOM.getDocument" => {
             let mut next_id = 1;
             serde_json::json!({
@@ -458,6 +593,19 @@ fn cdp_response(
         _ => serde_json::json!({}),
     };
     serde_json::json!({"id": id, "result": result})
+}
+
+/// The `Target.TargetInfo` object for kite-lite's one and only page/target.
+fn target_info(page: &kite_lite_core::Page) -> serde_json::Value {
+    serde_json::json!({
+        "targetId": CDP_TARGET_ID,
+        "type": "page",
+        "title": page.title.clone().unwrap_or_default(),
+        "url": page.url.clone().unwrap_or_else(|| "about:blank".to_string()),
+        "attached": true,
+        "canAccessOpener": false,
+        "browserContextId": "kite-lite-context"
+    })
 }
 
 fn navigate_page(session: &mut CdpSession, url: &str) -> serde_json::Value {
@@ -1080,6 +1228,31 @@ mod tests {
         );
         let node_ids = select_all["result"]["nodeIds"].as_array().unwrap();
         assert_eq!(node_ids.len(), 2);
+    }
+
+    #[test]
+    fn target_get_targets_reports_the_one_page() {
+        let mut page = parse_html("<title>Hi</title>");
+        page.url = Some("https://example.com/".to_string());
+        let session = test_session(page);
+        let response = cdp_response(serde_json::json!(1), "Target.getTargets", None, &session);
+        let targets = response["result"]["targetInfos"].as_array().unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0]["type"], "page");
+        assert_eq!(targets[0]["title"], "Hi");
+        assert_eq!(targets[0]["url"], "https://example.com/");
+    }
+
+    #[test]
+    fn target_attach_to_target_returns_a_session_id() {
+        let session = test_session(parse_html("<title>Hi</title>"));
+        let response = cdp_response(
+            serde_json::json!(2),
+            "Target.attachToTarget",
+            Some(&serde_json::json!({"targetId": CDP_TARGET_ID})),
+            &session,
+        );
+        assert_eq!(response["result"]["sessionId"], CDP_SESSION_ID);
     }
 
     #[test]
