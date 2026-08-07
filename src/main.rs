@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use kite_lite_core::{
-    compute_layout, lint_a11y, lint_webmcp, parse_html, render_pdf, render_png, render_svg,
-    resolve_links, A11ySeverity, EvalRequest, EvalResponse, WebMcpLintSeverity,
+    compute_layout, lint_a11y, lint_social, lint_webmcp, parse_html, render_pdf, render_png,
+    render_svg, resolve_links, A11ySeverity, EvalRequest, EvalResponse, SocialSeverity,
+    WebMcpLintSeverity,
 };
 use std::env;
 use std::fs;
@@ -49,6 +50,10 @@ async fn main() -> Result<()> {
 
     if args.get(1).map(String::as_str) == Some("a11y-lint") {
         return a11y_lint_command(&args).await;
+    }
+
+    if args.get(1).map(String::as_str) == Some("social-lint") {
+        return social_lint_command(&args).await;
     }
 
     if args.get(1).map(String::as_str) == Some("serve") {
@@ -282,6 +287,50 @@ async fn a11y_lint_command(args: &[String]) -> Result<()> {
     let error_count = findings.iter().filter(|f| f.severity == A11ySeverity::Error).count();
     if error_count > 0 {
         anyhow::bail!("{error_count} error(es) de accesibilidad encontrados");
+    }
+    Ok(())
+}
+
+/// Simulates a link-unfurling bot (Twitter/Slack/Facebook/...): resolves
+/// title/description/image through the Open Graph -> Twitter Card ->
+/// plain-meta/`<title>` fallback chain real crawlers use, and flags the
+/// common ways that preview ends up degraded — see
+/// `kite_lite_core::social::lint`. Same `<url|page.json|file.html>`
+/// convention as the other two linters. Exits non-zero when any
+/// `Error`-severity finding turns up (today: no title resolvable at all).
+async fn social_lint_command(args: &[String]) -> Result<()> {
+    let target = args
+        .get(2)
+        .context("usage: kite-lite social-lint <url|page.json|file.html> [--json]")?;
+    let json_output = args.iter().any(|arg| arg == "--json");
+
+    let page = load_page_target(target).await?;
+    let (preview, findings) = lint_social(&page);
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({"preview": preview, "findings": findings}))?);
+    } else {
+        println!("Titulo:      {}", preview.title.as_deref().unwrap_or("(ninguno)"));
+        println!("Descripcion: {}", preview.description.as_deref().unwrap_or("(ninguna)"));
+        println!("Imagen:      {}", preview.image.as_deref().unwrap_or("(ninguna)"));
+        if findings.is_empty() {
+            println!("\nSin hallazgos: el preview deberia verse bien en la mayoria de las plataformas.");
+        } else {
+            println!();
+            for finding in &findings {
+                let label = match finding.severity {
+                    SocialSeverity::Error => "ERROR",
+                    SocialSeverity::Warning => "WARN ",
+                    SocialSeverity::Info => "INFO ",
+                };
+                println!("[{label}] {}", finding.message);
+            }
+        }
+    }
+
+    let error_count = findings.iter().filter(|f| f.severity == SocialSeverity::Error).count();
+    if error_count > 0 {
+        anyhow::bail!("{error_count} error(es) de preview social encontrados");
     }
     Ok(())
 }

@@ -3,6 +3,7 @@ mod js;
 mod layout;
 mod raster;
 mod render;
+mod social;
 mod webmcp;
 
 use html5ever::{parse_document, tendril::TendrilSink};
@@ -91,6 +92,14 @@ pub struct Page {
     pub text: String,
     pub links: Vec<String>,
     pub root: Element,
+    /// Every `<meta name="..." content="...">` or `<meta property="..."
+    /// content="...">` in `<head>`, keyed by `name` (falling back to
+    /// `property`) in source order — e.g. `og:title`, `twitter:image`,
+    /// `description`. `<head>`'s children are otherwise discarded from
+    /// `root` (see `element_from_handle`), so this is the only place
+    /// meta tags surface.
+    #[serde(default)]
+    pub meta: Vec<(String, String)>,
     #[serde(skip)]
     pub source: Option<String>,
 }
@@ -111,6 +120,7 @@ pub struct EvalResponse {
 
 pub use a11y::{lint as lint_a11y, A11yFinding, Severity as A11ySeverity};
 pub use js::{JsRuntime, JsValueResult};
+pub use social::{lint as lint_social, Severity as SocialSeverity, SocialFinding, SocialPreview};
 pub use layout::compute_layout;
 pub use raster::{render_pdf, render_png};
 pub use render::render_svg;
@@ -151,6 +161,8 @@ pub fn parse_html(source: &str) -> Page {
     let title = find_title(&dom.document);
     let mut links = Vec::new();
     collect_links(&dom.document, &mut links);
+    let mut meta = Vec::new();
+    collect_meta(&dom.document, &mut meta);
     let text = normalize_text(&root.text);
 
     Page {
@@ -159,6 +171,7 @@ pub fn parse_html(source: &str) -> Page {
         text,
         links,
         root,
+        meta,
         source: Some(source.to_string()),
     }
 }
@@ -307,6 +320,27 @@ fn collect_links(handle: &Handle, links: &mut Vec<String>) {
     }
     for child in handle.children.borrow().iter() {
         collect_links(child, links);
+    }
+}
+
+fn collect_meta(handle: &Handle, meta: &mut Vec<(String, String)>) {
+    if let NodeData::Element { name, attrs, .. } = &handle.data {
+        if name.local.as_ref() == "meta" {
+            let attrs = attrs.borrow();
+            let find = |attr_name: &str| -> Option<String> {
+                attrs
+                    .iter()
+                    .find(|attr| attr.name.local.as_ref() == attr_name)
+                    .map(|attr| attr.value.to_string())
+            };
+            let key = find("name").or_else(|| find("property"));
+            if let (Some(key), Some(content)) = (key, find("content")) {
+                meta.push((key, content));
+            }
+        }
+    }
+    for child in handle.children.borrow().iter() {
+        collect_meta(child, meta);
     }
 }
 

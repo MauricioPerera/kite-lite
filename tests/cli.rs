@@ -1147,3 +1147,91 @@ fn a11y_lint_works_against_a_live_url() {
     assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
     assert!(String::from_utf8_lossy(&output.stdout).contains("lang"));
 }
+
+#[test]
+fn social_lint_falls_back_to_title_and_text_without_og_tags() {
+    let html = write_html(
+        "social-fallback.html",
+        r#"<title>Pagina sin OG</title><body>Este es el contenido de la pagina.</body>"#,
+    );
+
+    let output = Command::new(bin_path())
+        .args(["social-lint", html.0.to_str().unwrap()])
+        .output()
+        .expect("failed to run kite-lite social-lint");
+
+    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Pagina sin OG"), "{stdout}");
+    assert!(stdout.contains("contenido de la pagina"), "{stdout}");
+    assert!(stdout.contains("sin imagen"), "{stdout}");
+}
+
+#[test]
+fn social_lint_exits_zero_for_a_well_formed_local_file() {
+    let html = write_html(
+        "social-clean.html",
+        r#"<html><head>
+             <meta property="og:title" content="Titulo OG">
+             <meta property="og:description" content="Descripcion OG">
+             <meta property="og:image" content="https://example.com/img.png">
+           </head><body>Cuerpo</body></html>"#,
+    );
+
+    let output = Command::new(bin_path())
+        .args(["social-lint", html.0.to_str().unwrap()])
+        .output()
+        .expect("failed to run kite-lite social-lint");
+
+    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Sin hallazgos"));
+}
+
+#[test]
+fn social_lint_reports_error_and_exits_nonzero_without_any_title() {
+    let html = write_html("social-no-title.html", "<body></body>");
+
+    let output = Command::new(bin_path())
+        .args(["social-lint", html.0.to_str().unwrap()])
+        .output()
+        .expect("failed to run kite-lite social-lint");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("error(es)"));
+}
+
+#[test]
+fn social_lint_json_output_is_parseable() {
+    let html = write_html(
+        "social-json.html",
+        r#"<meta property="og:title" content="T"><meta property="og:image" content="/rel.png">"#,
+    );
+
+    let output = Command::new(bin_path())
+        .args(["social-lint", html.0.to_str().unwrap(), "--json"])
+        .output()
+        .expect("failed to run kite-lite social-lint");
+
+    assert!(output.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json output is not valid JSON");
+    assert_eq!(parsed["preview"]["title"], "T");
+    assert_eq!(parsed["preview"]["image"], "/rel.png");
+    let findings = parsed["findings"].as_array().expect("expected a findings array");
+    assert!(findings.iter().any(|f| f["message"].as_str().unwrap().contains("no es una URL absoluta")));
+}
+
+#[test]
+fn social_lint_works_against_a_live_url() {
+    let port = 19040;
+    spawn_interaction_server(port);
+    wait_for_port(port);
+
+    let output = Command::new(bin_path())
+        .args(["social-lint", &format!("http://127.0.0.1:{port}/")])
+        .output()
+        .expect("failed to run kite-lite social-lint");
+
+    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Home"));
+}

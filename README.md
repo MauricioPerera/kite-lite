@@ -397,6 +397,32 @@ falta una regla que sí deba romper el build):
 - Salto de nivel de encabezado (`<h1>` seguido de `<h3>` sin `<h2>`).
 - `<html>` sin atributo `lang`.
 
+### Preview de redes sociales (Open Graph / Twitter Card)
+
+`kite-lite social-lint <url|page.json|archivo.html> [--json]` simula lo
+que mostraría un bot de Twitter/Slack/Facebook/WhatsApp al compartir el
+link: resuelve título, descripción e imagen siguiendo la misma cadena de
+fallback que usan esos crawlers (Open Graph → Twitter Card → meta/`<title>`
+simple), y avisa cuándo ese preview va a salir degradado.
+
+```bash
+cargo run -- social-lint ./mi-pagina.html
+cargo run -- social-lint https://mi-sitio.com
+```
+
+- **Error** (exit code ≠ 0): no hay título resoluble por ningún camino
+  (ni `og:title`, ni `twitter:title`, ni `<title>`) — la mayoría de los
+  bots mostraría solo la URL pelada.
+- **Warning**: sin imagen (`og:image`/`twitter:image`); sin descripción
+  resoluble (ni meta/OG/Twitter ni texto de la página).
+- **Info**: la descripción supera ~200 caracteres (la mayoría de las
+  plataformas la recorta ahí); la imagen resuelta no es una URL absoluta
+  (muchos crawlers no la resuelven contra la página y la descartan).
+
+Esto requirió que kite-lite empiece a capturar `<meta>` del `<head>`
+(`Page.meta`), que antes se descartaba por completo junto con el resto
+del `<head>`.
+
 ## Despliegue en VPS
 
 El despliegue probado usa una imagen multi-stage y un usuario sin privilegios:
