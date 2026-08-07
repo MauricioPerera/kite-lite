@@ -11,6 +11,17 @@ Usage:
     python scripts/visual_diff.py <url_before> <url_after> [--out diff.png] [--threshold N]
 
 Env override: KITE_LITE_BIN (path to the kite-lite binary).
+
+Caveat if KITE_LITE_BIN points at scripts/kite-lite-docker: unlike the
+stdio/MCP-based scripts, this one needs kite-lite to write a PNG to a
+*file*. That file only lives inside the container's own ephemeral
+filesystem unless the wrapper bind-mounts a shared directory (the
+shipped wrapper deliberately doesn't, to keep the container's rootfs
+isolated) — you'd need a variant with e.g. `-v /tmp:/tmp` for this
+script specifically. This script pre-creates the temp file world-
+writable so it works once such a bind mount is in place, since the
+container runs as a non-root uid that otherwise can't write into a
+root-owned file at a shared path.
 """
 
 import binascii
@@ -32,6 +43,7 @@ BINARY = os.environ.get("KITE_LITE_BIN", str(DEFAULT_BINARY))
 def render_png(url):
     fd, path = tempfile.mkstemp(suffix=".png")
     os.close(fd)
+    os.chmod(path, 0o666)
     try:
         proc = subprocess.run([BINARY, url, "--png", path], capture_output=True, text=True, timeout=30)
         if proc.returncode != 0:
