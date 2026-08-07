@@ -549,6 +549,23 @@ fn spawn_interaction_server(port: u16) {
                         .unwrap_or_default();
                     format!("<title>Results: {q}</title>")
                 }
+                "/webmcp" => r#"<title>WebMCP Home</title>
+                    <form toolname="search-cars" tooldescription="Search for a car" action="/webmcp-search">
+                        <input type="text" name="make" required toolparamdescription="The vehicle's make">
+                        <input type="text" name="model">
+                        <button type="submit">Search</button>
+                    </form>"#
+                    .to_string(),
+                "/webmcp-search" => {
+                    let params = url::form_urlencoded::parse(query.as_bytes())
+                        .into_owned()
+                        .collect::<std::collections::HashMap<_, _>>();
+                    format!(
+                        "<title>Results: {} {}</title>",
+                        params.get("make").cloned().unwrap_or_default(),
+                        params.get("model").cloned().unwrap_or_default()
+                    )
+                }
                 _ => String::new(),
             };
             let status = if body.is_empty() { "404 Not Found" } else { "200 OK" };
@@ -823,7 +840,7 @@ fn mcp_initialize_and_list_tools() {
     let list = mcp.send(1, "tools/list", serde_json::json!({}));
     let tools = list["result"]["tools"].as_array().expect("tools/list missing tools array");
     let names: Vec<&str> = tools.iter().filter_map(|tool| tool["name"].as_str()).collect();
-    for expected in ["fetch_page", "render_screenshot", "eval_js", "browser_navigate", "browser_click", "browser_type", "browser_get_dom", "browser_screenshot"] {
+    for expected in ["fetch_page", "render_screenshot", "eval_js", "browser_navigate", "browser_click", "browser_type", "browser_get_dom", "browser_screenshot", "browser_call_tool"] {
         assert!(names.contains(&expected), "missing tool '{expected}' in {names:?}");
     }
 }
@@ -927,5 +944,42 @@ fn mcp_browser_get_dom_and_unknown_selector_error() {
     );
 
     let missing = mcp.call_tool(4, "browser_click", serde_json::json!({"selector": "video"}));
+    assert_eq!(missing["result"]["isError"], true, "{missing:?}");
+}
+
+#[test]
+fn mcp_discovers_and_calls_a_declarative_webmcp_tool() {
+    let port = 19037;
+    spawn_interaction_server(port);
+    wait_for_port(port);
+
+    let mut mcp = McpClient::start();
+
+    let nav = mcp.call_tool(2, "browser_navigate", serde_json::json!({"url": format!("http://127.0.0.1:{port}/webmcp")}));
+    assert_eq!(nav["result"]["isError"], false, "{nav:?}");
+    let nav_summary: serde_json::Value =
+        serde_json::from_str(nav["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let tools = nav_summary["tools"].as_array().expect("missing discovered tools");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["name"], "search-cars");
+    assert_eq!(tools[0]["description"], "Search for a car");
+    assert_eq!(tools[0]["autosubmit"], false);
+    assert_eq!(tools[0]["inputSchema"]["required"], serde_json::json!(["make"]));
+    assert_eq!(
+        tools[0]["inputSchema"]["properties"]["make"]["description"],
+        "The vehicle's make"
+    );
+
+    let call = mcp.call_tool(
+        3,
+        "browser_call_tool",
+        serde_json::json!({"name": "search-cars", "arguments": {"make": "BMW", "model": "330i"}}),
+    );
+    assert_eq!(call["result"]["isError"], false, "{call:?}");
+    let call_summary: serde_json::Value =
+        serde_json::from_str(call["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(call_summary["title"], "Results: BMW 330i");
+
+    let missing = mcp.call_tool(4, "browser_call_tool", serde_json::json!({"name": "no-such-tool"}));
     assert_eq!(missing["result"]["isError"], true, "{missing:?}");
 }

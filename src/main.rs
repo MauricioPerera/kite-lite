@@ -1266,6 +1266,18 @@ fn mcp_tool_definitions() -> Vec<serde_json::Value> {
                 "properties": {"format": {"type": "string", "enum": ["png", "svg"]}}
             }
         }),
+        serde_json::json!({
+            "name": "browser_call_tool",
+            "description": "Call a WebMCP tool declared on the current session page via the toolname/tooldescription/toolparamdescription HTML attributes on a <form> (see https://github.com/webmachinelearning/webmcp/blob/main/declarative-api-explainer.md). Fills the form's fields from 'arguments' (falling back to each field's current value when omitted) and submits it: GET only, no request body — the same limitation as browser_click's form submit. Only the declarative HTML-attribute API is supported, not the imperative navigator.modelContext JavaScript API (no page JavaScript runs). Discoverable tools are listed under 'tools' in any page summary returned by fetch_page, browser_navigate, or browser_click.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The tool's toolname"},
+                    "arguments": {"type": "object", "description": "Values keyed by each field's name attribute"}
+                },
+                "required": ["name"]
+            }
+        }),
     ]
 }
 
@@ -1290,6 +1302,7 @@ fn mcp_tool_call(
         "browser_type" => mcp_browser_type(session, arguments),
         "browser_get_dom" => mcp_browser_get_dom(session, arguments),
         "browser_screenshot" => mcp_browser_screenshot(session, arguments),
+        "browser_call_tool" => mcp_browser_call_tool(session, arguments),
         _ => return Err((-32602, format!("unknown tool: {name}"))),
     };
 
@@ -1310,11 +1323,25 @@ fn require_str<'a>(arguments: &'a serde_json::Value, key: &str) -> std::result::
 }
 
 fn page_summary(page: &kite_lite_core::Page) -> serde_json::Value {
-    serde_json::json!({
+    let mut summary = serde_json::json!({
         "url": page.url,
         "title": page.title,
         "text": page.text,
         "links": page.links,
+    });
+    let tools = kite_lite_core::discover_webmcp_tools(page);
+    if !tools.is_empty() {
+        summary["tools"] = serde_json::Value::Array(tools.iter().map(webmcp_tool_json).collect());
+    }
+    summary
+}
+
+fn webmcp_tool_json(tool: &kite_lite_core::WebMcpTool) -> serde_json::Value {
+    serde_json::json!({
+        "name": tool.name,
+        "description": tool.description,
+        "autosubmit": tool.autosubmit,
+        "inputSchema": tool.input_schema,
     })
 }
 
@@ -1411,6 +1438,28 @@ fn mcp_browser_click(
     Ok(text_content(summary.to_string()))
 }
 
+fn mcp_browser_call_tool(
+    session: &mut CdpSession,
+    arguments: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    let tool_name = require_str(arguments, "name")?;
+    let empty = serde_json::json!({});
+    let tool_arguments = arguments.get("arguments").unwrap_or(&empty);
+    let (action_url, query) = kite_lite_core::build_webmcp_submission(&session.page, tool_name, tool_arguments)
+        .ok_or_else(|| format!("no WebMCP tool named '{tool_name}' on the current page"))?;
+    let separator = if action_url.contains('?') { "&" } else { "?" };
+    let target = if query.is_empty() {
+        action_url
+    } else {
+        format!("{action_url}{separator}{query}")
+    };
+    let outcome = navigate_page(session, &target);
+    if let Some(error_text) = outcome.get("errorText").and_then(serde_json::Value::as_str) {
+        return Err(error_text.to_string());
+    }
+    Ok(text_content(page_summary(&session.page).to_string()))
+}
+
 fn mcp_browser_type(
     session: &mut CdpSession,
     arguments: &serde_json::Value,
@@ -1476,10 +1525,7 @@ mod tests {
             text: text.to_string(),
             href: href.map(str::to_string),
             children,
-            layout: None,
-            value: None,
-            name: None,
-            kind: None,
+            ..Default::default()
         }
     }
 

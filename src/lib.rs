@@ -2,6 +2,7 @@ mod js;
 mod layout;
 mod raster;
 mod render;
+mod webmcp;
 
 use html5ever::{parse_document, tendril::TendrilSink};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
@@ -21,7 +22,7 @@ pub struct Layout {
     pub height: f64,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Element {
     pub tag: String,
     pub text: String,
@@ -45,6 +46,26 @@ pub struct Element {
     /// (`type="submit"`) apart from a text field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// Declarative WebMCP tool name (the `toolname` attribute on a `<form>`;
+    /// see <https://github.com/webmachinelearning/webmcp/blob/main/declarative-api-explainer.md>).
+    /// A form only becomes a discoverable tool once this is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    /// `tooldescription` on a `<form>`: the tool's description in its
+    /// generated MCP schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_description: Option<String>,
+    /// Presence of the boolean `toolautosubmit` attribute on a `<form>`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tool_autosubmit: bool,
+    /// `toolparamdescription` on a form field: that property's description
+    /// in the generated input schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_param_description: Option<String>,
+    /// Presence of the boolean `required` attribute on a form field, which
+    /// feeds the generated input schema's `required` list.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -77,6 +98,7 @@ pub use js::{JsRuntime, JsValueResult};
 pub use layout::compute_layout;
 pub use raster::{render_pdf, render_png};
 pub use render::render_svg;
+pub use webmcp::{build_submission as build_webmcp_submission, discover_tools as discover_webmcp_tools, WebMcpTool};
 
 /// Rewrites every relative link (`page.links` and each `Element.href`) into
 /// an absolute URL resolved against `base`. Hrefs that fail to parse (e.g.
@@ -122,8 +144,24 @@ pub fn parse_html(source: &str) -> Page {
     }
 }
 
+/// The subset of `Element`'s fields that come straight from parsed
+/// attributes, before layout/children/text are known.
+#[derive(Default)]
+struct ParsedAttrs {
+    tag: String,
+    href: Option<String>,
+    value: Option<String>,
+    name: Option<String>,
+    kind: Option<String>,
+    tool_name: Option<String>,
+    tool_description: Option<String>,
+    tool_autosubmit: bool,
+    tool_param_description: Option<String>,
+    required: bool,
+}
+
 fn element_from_handle(handle: &Handle) -> Element {
-    let (tag, href, value, name, kind) = match &handle.data {
+    let attrs = match &handle.data {
         NodeData::Element { name: tag_name, attrs, .. } => {
             let attrs = attrs.borrow();
             let tag = tag_name.local.to_string();
@@ -134,22 +172,41 @@ fn element_from_handle(handle: &Handle) -> Element {
                     .find(|attr| attr.name.local.as_ref() == attr_name)
                     .map(|attr| attr.value.to_string())
             };
-            (tag, attr(href_attr_name), attr("value"), attr("name"), attr("type"))
+            let has_attr = |attr_name: &str| -> bool {
+                attrs.iter().any(|attr| attr.name.local.as_ref() == attr_name)
+            };
+            ParsedAttrs {
+                tag,
+                href: attr(href_attr_name),
+                value: attr("value"),
+                name: attr("name"),
+                kind: attr("type"),
+                tool_name: attr("toolname"),
+                tool_description: attr("tooldescription"),
+                tool_autosubmit: has_attr("toolautosubmit"),
+                tool_param_description: attr("toolparamdescription"),
+                required: has_attr("required"),
+            }
         }
-        NodeData::Document => ("document".to_string(), None, None, None, None),
-        _ => ("text".to_string(), None, None, None, None),
+        NodeData::Document => ParsedAttrs { tag: "document".to_string(), ..Default::default() },
+        _ => ParsedAttrs { tag: "text".to_string(), ..Default::default() },
     };
 
-    if matches!(tag.as_str(), "head" | "script" | "style") {
+    if matches!(attrs.tag.as_str(), "head" | "script" | "style") {
         return Element {
-            tag,
+            tag: attrs.tag,
             text: String::new(),
-            href,
+            href: attrs.href,
             children: Vec::new(),
             layout: None,
-            value,
-            name,
-            kind,
+            value: attrs.value,
+            name: attrs.name,
+            kind: attrs.kind,
+            tool_name: attrs.tool_name,
+            tool_description: attrs.tool_description,
+            tool_autosubmit: attrs.tool_autosubmit,
+            tool_param_description: attrs.tool_param_description,
+            required: attrs.required,
         };
     }
 
@@ -170,21 +227,26 @@ fn element_from_handle(handle: &Handle) -> Element {
 
     // <textarea>initial value</textarea> sets its value via child text, not
     // a `value` attribute.
-    let value = if tag == "textarea" && value.is_none() {
+    let value = if attrs.tag == "textarea" && attrs.value.is_none() {
         Some(text.clone())
     } else {
-        value
+        attrs.value
     };
 
     Element {
-        tag,
+        tag: attrs.tag,
         text,
-        href,
+        href: attrs.href,
         children,
         layout: None,
         value,
-        name,
-        kind,
+        name: attrs.name,
+        kind: attrs.kind,
+        tool_name: attrs.tool_name,
+        tool_description: attrs.tool_description,
+        tool_autosubmit: attrs.tool_autosubmit,
+        tool_param_description: attrs.tool_param_description,
+        required: attrs.required,
     }
 }
 

@@ -310,11 +310,41 @@ se devuelve como `isError: true` con el mensaje en el contenido — así el
 agente lo ve y puede reaccionar, en vez de que falle la llamada JSON-RPC
 completa.
 
-**Límite honesto:** esto se verificó hablando el protocolo a mano (un
-proceso real, mensajes JSON-RPC reales por stdin/stdout, igual rigor que
-las pruebas de CDP) — no se probó contra un cliente MCP real (Claude
-Desktop/Code) en esta sesión, así que confirma que el protocolo es
-correcto, no que un cliente específico lo acepte sin fricción.
+Se verificó además con un cliente MCP real, no solo hablando el protocolo
+a mano: [`scripts/mcp_ollama_bridge.py`](scripts/mcp_ollama_bridge.py)
+conecta un modelo de Ollama Cloud (con tool-calling nativo) al servidor
+MCP de kite-lite, dejando que el modelo decida qué herramienta llamar y
+con qué argumentos — se probaron así las 9 herramientas, incluyendo el
+flujo completo `browser_navigate` → `browser_click` → `browser_type` →
+submit de formulario, y captura de pantalla en ambos formatos. Está
+configurado también en `claude_desktop_config.json` para Claude Desktop,
+aunque esa integración puntual no se validó con una conversación real en
+la app.
+
+## Soporte declarativo de WebMCP
+
+Además de sus propias herramientas, kite-lite detecta formularios
+anotados con los atributos declarativos de
+[WebMCP](https://github.com/webmachinelearning/webmcp/blob/main/declarative-api-explainer.md)
+(`toolname`, `tooldescription`, `toolparamdescription`, `toolautosubmit`,
+`required`) y los expone como tools adicionales:
+
+- Cualquier resumen de página (`fetch_page`, `browser_navigate`,
+  `browser_click`) incluye un campo `tools` con las tools detectadas: su
+  nombre, descripción, `autosubmit`, y un `inputSchema` JSON generado a
+  partir de los campos del formulario (`<select>` se vuelve un `enum` de
+  strings con sus `<option value>`; `type="checkbox"`/`"number"` se
+  infieren como `boolean`/`number`; el resto, `string`).
+- `browser_call_tool(name, arguments?)` llena esos campos con
+  `arguments` (usando el valor actual del campo si falta alguno) y
+  envía el formulario, igual que `browser_click` sobre un submit.
+
+**Límites explícitos:** solo el subset **declarativo** (atributos HTML)
+está soportado — la API **imperativa** (`navigator.modelContext.registerTool()`
+en JS) no, porque requeriría ejecutar JS de la página contra un DOM vivo,
+justo lo que kite-lite evita a propósito (ver "Próximas capas" más abajo).
+El envío del formulario es GET únicamente, sin cuerpo de request — la
+misma limitación que el submit por click.
 
 ## Despliegue en VPS
 
@@ -336,10 +366,12 @@ autenticación. No se recomienda exponerlo directamente a Internet.
 
 El roadmap original (fetcher/JS aislados, URLs/cookies/redirecciones,
 layout mínimo, interacción, PNG/PDF, compatibilidad CDP, servidor MCP) está
-completo. La limitación más grande que queda, y que no tiene una solución
-que no rompa el modelo de aislamiento de este proyecto: kite-lite no puede
-ver nada que dependa de JavaScript para renderizarse (SPAs, contenido
-cargado por fetch del lado cliente) — es la contracara directa de no tener
-un DOM vivo ligado a JS, la misma razón por la que ni la interacción real
-ni Playwright funcionan. No hay ítem de roadmap para esto porque resolverlo
-significaría abandonar esa decisión de diseño, no extenderla.
+completo, más el soporte declarativo de WebMCP agregado después. La
+limitación más grande que queda, y que no tiene una solución que no rompa
+el modelo de aislamiento de este proyecto: kite-lite no puede ver nada que
+dependa de JavaScript para renderizarse (SPAs, contenido cargado por fetch
+del lado cliente) — es la contracara directa de no tener un DOM vivo ligado
+a JS, la misma razón por la que ni la interacción real, ni Playwright, ni
+la API **imperativa** de WebMCP funcionan. No hay ítem de roadmap para
+esto porque resolverlo significaría abandonar esa decisión de diseño, no
+extenderla.
