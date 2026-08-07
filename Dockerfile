@@ -16,3 +16,13 @@ COPY --from=builder /build/target/release/kite-lite-js /usr/local/bin/kite-lite-
 USER kite
 WORKDIR /home/kite
 ENTRYPOINT ["/usr/local/bin/kite-lite"]
+
+# Resource limits are a `docker run` concern, not something this image can
+# declare — measured floor (see README's "Recursos minimos"): Docker itself
+# refuses --memory below 6m, and real peak usage against a typical page
+# stays under 7 MiB even for PNG/PDF rendering. Recommended, with margin:
+#   docker run --rm \
+#     --memory=32m --cpus=0.2 --pids-limit=16 \
+#     --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+#     --cap-drop=ALL --security-opt=no-new-privileges \
+#     kite-lite:dev cdp 0.0.0.0:9222

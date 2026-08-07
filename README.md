@@ -353,7 +353,7 @@ El despliegue probado usa una imagen multi-stage y un usuario sin privilegios:
 ```bash
 docker build -t kite-lite:dev .
 docker run --rm \
-  --memory=256m --cpus=0.5 --pids-limit=64 \
+  --memory=32m --cpus=0.2 --pids-limit=16 \
   --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
   --cap-drop=ALL --security-opt=no-new-privileges \
   kite-lite:dev cdp 0.0.0.0:9222
@@ -361,6 +361,41 @@ docker run --rm \
 
 El puerto CDP debe mantenerse en loopback o protegerse con un túnel y
 autenticación. No se recomienda exponerlo directamente a Internet.
+
+### Recursos mínimos (medido, no estimado)
+
+Medido en el VPS real (Docker, cgroup v2, `memory.peak`, contra
+`https://example.com`), bisectando `--memory`/`--cpus` hasta encontrar
+el punto de falla:
+
+| Modo | Pico de memoria real |
+|---|---|
+| `fetch` / `--js` (sin render) | ~4.1–4.2 MiB |
+| `--png` | ~4.5 MiB |
+| `--pdf` | ~5.3 MiB |
+| `serve` en reposo | ~4.0–4.4 MiB |
+| `serve` tras un `parse`+`render png` | ~6.0–7.0 MiB |
+| `cdp` en reposo | ~4.0 MiB |
+| `mcp` (`initialize` + `fetch_page`) | ~3.9–4.5 MiB |
+
+No se pudo bajar de **6 MB** de límite porque **Docker mismo lo rechaza**
+("Minimum memory limit allowed is 6MB") — no es un piso de kite-lite, es
+un piso del motor de contenedores. El proceso en producción (7+ horas de
+uptime real al momento de medir) confirma lo mismo: `memory.peak` de
+4.46 MiB con un límite de 256 MB, es decir, sobre-aprovisionado ~55x.
+
+La cuota de `--cpus` no afectó la corrección de ningún resultado — incluso
+en `--cpus=0.01` (1% de un core) un render terminó en ~11 s sin fallar; en
+esta carga la CPU importa para la latencia bajo concurrencia, no para si
+funciona o no. `--pids-limit=16` alcanza de sobra: en reposo el proceso
+usa 4 hilos (el runtime de tokio lanza uno por core del host, sin relación
+con `--cpus`).
+
+Los `32m`/`0.2` de arriba son el mínimo recomendado con margen (no el piso
+exacto de 6 MB/6 MiB) para absorber páginas más pesadas que una página de
+ejemplo simple — DOMs más grandes, PNGs de mayor resolución. Para páginas
+grandes en producción, medí de nuevo con tu propio contenido antes de
+ajustar el límite hacia abajo.
 
 ## Próximas capas
 
