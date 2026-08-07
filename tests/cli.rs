@@ -51,6 +51,12 @@ fn write_sample_page(name: &str) -> TempPath {
     TempPath(path)
 }
 
+fn write_html(name: &str, content: &str) -> TempPath {
+    let path = temp_file(name);
+    std::fs::write(&path, content).expect("failed to write html file");
+    TempPath(path)
+}
+
 struct ChildGuard(Child);
 
 impl Drop for ChildGuard {
@@ -982,4 +988,85 @@ fn mcp_discovers_and_calls_a_declarative_webmcp_tool() {
 
     let missing = mcp.call_tool(4, "browser_call_tool", serde_json::json!({"name": "no-such-tool"}));
     assert_eq!(missing["result"]["isError"], true, "{missing:?}");
+}
+
+#[test]
+fn webmcp_lint_reports_errors_and_exits_nonzero_for_a_broken_local_file() {
+    let html = write_html(
+        "webmcp-broken.html",
+        r#"<form toolname="go now">
+             <input type="text">
+             <select name="team"></select>
+           </form>"#,
+    );
+
+    let output = Command::new(bin_path())
+        .args(["webmcp-lint", html.0.to_str().unwrap()])
+        .output()
+        .expect("failed to run kite-lite webmcp-lint");
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("falta tooldescription"), "{stdout}");
+    assert!(stdout.contains("caracteres fuera de"), "{stdout}");
+    assert!(stdout.contains("no tiene 'name'"), "{stdout}");
+    assert!(stdout.contains("enum vacio"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error(es)"), "{stderr}");
+}
+
+#[test]
+fn webmcp_lint_exits_zero_for_a_well_formed_local_file() {
+    let html = write_html(
+        "webmcp-clean.html",
+        r#"<form toolname="search-cars" tooldescription="Search for a car" action="/search">
+             <input type="text" name="make" toolparamdescription="The make">
+           </form>"#,
+    );
+
+    let output = Command::new(bin_path())
+        .args(["webmcp-lint", html.0.to_str().unwrap()])
+        .output()
+        .expect("failed to run kite-lite webmcp-lint");
+
+    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Sin hallazgos"));
+}
+
+#[test]
+fn webmcp_lint_json_output_is_parseable() {
+    let html = write_html(
+        "webmcp-json.html",
+        r#"<form toolname="go" tooldescription="Go" action="/x"><input name="q"></form>"#,
+    );
+
+    let output = Command::new(bin_path())
+        .args(["webmcp-lint", html.0.to_str().unwrap(), "--json"])
+        .output()
+        .expect("failed to run kite-lite webmcp-lint");
+
+    assert!(output.status.success());
+    let findings: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json output is not valid JSON");
+    let findings = findings.as_array().expect("expected a JSON array");
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0]["severity"], "info");
+    assert_eq!(findings[0]["tool"], "go");
+}
+
+#[test]
+fn webmcp_lint_works_against_a_live_url() {
+    let port = 19038;
+    spawn_interaction_server(port);
+    wait_for_port(port);
+
+    let output = Command::new(bin_path())
+        .args(["webmcp-lint", &format!("http://127.0.0.1:{port}/webmcp")])
+        .output()
+        .expect("failed to run kite-lite webmcp-lint");
+
+    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("model"), "{stdout}");
+    assert!(stdout.contains("toolparamdescription"), "{stdout}");
 }

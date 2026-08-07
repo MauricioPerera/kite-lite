@@ -7,7 +7,9 @@
 //! (the imperative `navigator.modelContext` API is out of scope).
 
 use crate::{Element, Page};
+use serde::Serialize;
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct WebMcpTool {
@@ -145,6 +147,144 @@ fn default_field_value(element: &Element) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    /// Breaks the tool for any agent: missing/duplicate name, no description.
+    Error,
+    /// Works, but likely not what the author intended.
+    Warning,
+    /// Not a spec violation — a kite-lite-specific caveat or a style nit.
+    Info,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LintFinding {
+    pub severity: Severity,
+    pub tool: String,
+    pub message: String,
+}
+
+/// Checks every `<form toolname="...">` on `page` against a handful of
+/// practical rules — see the individual `push_*` calls below for what's
+/// checked and why. Only forms that opt in with `toolname` are inspected;
+/// a plain form is not an error.
+pub fn lint(page: &Page) -> Vec<LintFinding> {
+    let mut forms = Vec::new();
+    collect_tool_forms(&page.root, &mut forms);
+
+    let mut occurrences: HashMap<&str, u32> = HashMap::new();
+    for form in &forms {
+        let name = form.tool_name.as_deref().unwrap_or_default();
+        *occurrences.entry(name).or_insert(0) += 1;
+    }
+
+    let mut findings = Vec::new();
+    for form in &forms {
+        let name = form.tool_name.as_deref().unwrap_or_default();
+        lint_form(form, name, occurrences[name], &mut findings);
+    }
+    findings
+}
+
+fn collect_tool_forms<'a>(element: &'a Element, forms: &mut Vec<&'a Element>) {
+    if element.tag == "form" && element.tool_name.is_some() {
+        forms.push(element);
+    }
+    for child in &element.children {
+        collect_tool_forms(child, forms);
+    }
+}
+
+fn add_finding(findings: &mut Vec<LintFinding>, severity: Severity, tool: &str, message: impl Into<String>) {
+    findings.push(LintFinding { severity, tool: tool.to_string(), message: message.into() });
+}
+
+fn lint_form(form: &Element, name: &str, occurrences: u32, findings: &mut Vec<LintFinding>) {
+    if name.trim().is_empty() {
+        add_finding(findings, Severity::Error, name, "toolname esta vacio");
+    } else if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        add_finding(
+            findings,
+            Severity::Warning,
+            name,
+            format!("toolname '{name}' tiene caracteres fuera de [A-Za-z0-9_-]; algunos backends de tool-calling lo rechazan"),
+        );
+    }
+
+    if occurrences > 1 {
+        add_finding(
+            findings,
+            Severity::Error,
+            name,
+            format!("hay {occurrences} formularios con toolname '{name}' en la pagina: un agente no puede distinguir cual invocar"),
+        );
+    }
+
+    if form.tool_description.as_deref().unwrap_or_default().trim().is_empty() {
+        add_finding(
+            findings,
+            Severity::Error,
+            name,
+            "falta tooldescription (obligatorio: sin descripcion el agente no sabe cuando usar la tool)",
+        );
+    }
+
+    if form.href.is_none() {
+        add_finding(
+            findings,
+            Severity::Warning,
+            name,
+            "el formulario no tiene 'action': el submit apuntara a la URL de la propia pagina, probablemente no es lo que se busca",
+        );
+    }
+
+    if form.method.as_deref().is_some_and(|m| m.eq_ignore_ascii_case("post")) {
+        add_finding(
+            findings,
+            Severity::Info,
+            name,
+            "method=\"post\": kite-lite solo puede simular un submit GET (browser_call_tool no reflejara el comportamiento real de este formulario) — probalo tambien en un navegador con WebMCP nativo",
+        );
+    }
+
+    lint_fields(form, name, findings);
+}
+
+fn lint_fields(element: &Element, tool_name: &str, findings: &mut Vec<LintFinding>) {
+    if matches!(element.tag.as_str(), "input" | "textarea" | "select") {
+        match &element.name {
+            None => add_finding(
+                findings,
+                Severity::Warning,
+                tool_name,
+                format!("un <{}> del formulario no tiene 'name': queda fuera del schema y el agente no podra completarlo", element.tag),
+            ),
+            Some(field_name) => {
+                if element.tool_param_description.is_none() {
+                    add_finding(
+                        findings,
+                        Severity::Info,
+                        tool_name,
+                        format!("el campo '{field_name}' no tiene toolparamdescription; no es obligatorio pero ayuda al agente a completarlo bien"),
+                    );
+                }
+                if element.tag == "select" && option_values(element).next().is_none() {
+                    add_finding(
+                        findings,
+                        Severity::Warning,
+                        tool_name,
+                        format!("<select name=\"{field_name}\"> no tiene ninguna <option>: el schema generado tendria un enum vacio"),
+                    );
+                }
+            }
+        }
+    }
+    for child in &element.children {
+        lint_fields(child, tool_name, findings);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +363,107 @@ mod tests {
     fn build_submission_returns_none_for_an_unknown_tool() {
         let page = parse_html(r#"<form toolname="a" tooldescription="A"></form>"#);
         assert!(build_submission(&page, "b", &json!({})).is_none());
+    }
+
+    fn messages(findings: &[LintFinding], severity: Severity) -> Vec<&str> {
+        findings
+            .iter()
+            .filter(|f| f.severity == severity)
+            .map(|f| f.message.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_well_formed_tool_produces_no_findings() {
+        let page = parse_html(
+            r#"<form toolname="search-cars" tooldescription="Search for a car" action="/search">
+                 <input type="text" name="make" toolparamdescription="The make">
+               </form>"#,
+        );
+        assert!(lint(&page).is_empty());
+    }
+
+    #[test]
+    fn missing_tooldescription_is_an_error() {
+        let page = parse_html(r#"<form toolname="go" action="/x"><input name="q"></form>"#);
+        let findings = lint(&page);
+        assert!(messages(&findings, Severity::Error)
+            .iter()
+            .any(|m| m.contains("tooldescription")));
+    }
+
+    #[test]
+    fn duplicate_toolnames_are_an_error() {
+        let page = parse_html(
+            r#"<form toolname="go" tooldescription="Go" action="/a"></form>
+               <form toolname="go" tooldescription="Go again" action="/b"></form>"#,
+        );
+        let findings = lint(&page);
+        assert!(messages(&findings, Severity::Error)
+            .iter()
+            .any(|m| m.contains("2 formularios")));
+    }
+
+    #[test]
+    fn field_without_name_is_a_warning() {
+        let page = parse_html(
+            r#"<form toolname="go" tooldescription="Go" action="/x"><input type="text"></form>"#,
+        );
+        let findings = lint(&page);
+        assert!(messages(&findings, Severity::Warning)
+            .iter()
+            .any(|m| m.contains("no tiene 'name'")));
+    }
+
+    #[test]
+    fn empty_select_is_a_warning() {
+        let page = parse_html(
+            r#"<form toolname="go" tooldescription="Go" action="/x"><select name="team"></select></form>"#,
+        );
+        let findings = lint(&page);
+        assert!(messages(&findings, Severity::Warning)
+            .iter()
+            .any(|m| m.contains("enum vacio")));
+    }
+
+    #[test]
+    fn missing_action_is_a_warning() {
+        let page = parse_html(r#"<form toolname="go" tooldescription="Go"></form>"#);
+        let findings = lint(&page);
+        assert!(messages(&findings, Severity::Warning)
+            .iter()
+            .any(|m| m.contains("'action'")));
+    }
+
+    #[test]
+    fn post_method_is_an_info_note_not_an_error() {
+        let page = parse_html(
+            r#"<form toolname="go" tooldescription="Go" action="/x" method="post"></form>"#,
+        );
+        let findings = lint(&page);
+        assert!(messages(&findings, Severity::Info)
+            .iter()
+            .any(|m| m.contains("method=\"post\"")));
+        assert!(findings.iter().all(|f| f.severity != Severity::Error || !f.message.contains("post")));
+    }
+
+    #[test]
+    fn field_without_toolparamdescription_is_an_info_note() {
+        let page = parse_html(
+            r#"<form toolname="go" tooldescription="Go" action="/x"><input name="q"></form>"#,
+        );
+        let findings = lint(&page);
+        assert!(messages(&findings, Severity::Info)
+            .iter()
+            .any(|m| m.contains("toolparamdescription")));
+    }
+
+    #[test]
+    fn toolname_with_spaces_is_a_warning() {
+        let page = parse_html(r#"<form toolname="go now" tooldescription="Go" action="/x"></form>"#);
+        let findings = lint(&page);
+        assert!(messages(&findings, Severity::Warning)
+            .iter()
+            .any(|m| m.contains("caracteres fuera de")));
     }
 }

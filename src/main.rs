@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use kite_lite_core::{
-    compute_layout, parse_html, render_pdf, render_png, render_svg, resolve_links, EvalRequest,
-    EvalResponse,
+    compute_layout, lint_webmcp, parse_html, render_pdf, render_png, render_svg, resolve_links,
+    EvalRequest, EvalResponse, WebMcpLintSeverity,
 };
 use std::env;
 use std::fs;
@@ -41,6 +41,10 @@ async fn main() -> Result<()> {
 
     if args.get(1).map(String::as_str) == Some("render") {
         return render_command(&args);
+    }
+
+    if args.get(1).map(String::as_str) == Some("webmcp-lint") {
+        return webmcp_lint_command(&args).await;
     }
 
     if args.get(1).map(String::as_str) == Some("serve") {
@@ -183,6 +187,55 @@ fn render_command(args: &[String]) -> Result<()> {
     };
     fs::write(output, bytes)?;
     eprintln!("{format} written to {output}");
+    Ok(())
+}
+
+/// Checks a page's declarative WebMCP forms (`toolname`/`tooldescription`/...)
+/// against a handful of practical rules — see `kite_lite_core::webmcp::lint`
+/// for what's checked. `target` can be a live URL, an already-fetched
+/// `page.json` snapshot, or a raw local `.html` file. Exits non-zero when any
+/// `Error`-severity finding turns up, so it's usable as a CI gate.
+async fn webmcp_lint_command(args: &[String]) -> Result<()> {
+    let target = args
+        .get(2)
+        .context("usage: kite-lite webmcp-lint <url|page.json|file.html> [--json]")?;
+    let json_output = args.iter().any(|arg| arg == "--json");
+
+    let page = if target.starts_with("http://") || target.starts_with("https://") {
+        let client = http_client()?;
+        fetch_page(&client, target).await?
+    } else if target.ends_with(".json") {
+        serde_json::from_str(&fs::read_to_string(target)?)?
+    } else {
+        parse_html(&fs::read_to_string(target)?)
+    };
+
+    let findings = lint_webmcp(&page);
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&findings)?);
+    } else if findings.is_empty() {
+        println!(
+            "Sin hallazgos: no hay problemas en las tools de WebMCP declarativo (o la pagina no declara ninguna via 'toolname')."
+        );
+    } else {
+        for finding in &findings {
+            let label = match finding.severity {
+                WebMcpLintSeverity::Error => "ERROR",
+                WebMcpLintSeverity::Warning => "WARN ",
+                WebMcpLintSeverity::Info => "INFO ",
+            };
+            println!("[{label}] {}: {}", finding.tool, finding.message);
+        }
+    }
+
+    let error_count = findings
+        .iter()
+        .filter(|f| f.severity == WebMcpLintSeverity::Error)
+        .count();
+    if error_count > 0 {
+        anyhow::bail!("{error_count} error(es) de WebMCP declarativo encontrados");
+    }
     Ok(())
 }
 

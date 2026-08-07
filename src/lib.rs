@@ -66,6 +66,11 @@ pub struct Element {
     /// feeds the generated input schema's `required` list.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub required: bool,
+    /// The `method` attribute on a `<form>` (e.g. `"post"`), used by the
+    /// WebMCP linter to flag forms kite-lite can't actually submit — it
+    /// only ever simulates a GET.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -98,7 +103,10 @@ pub use js::{JsRuntime, JsValueResult};
 pub use layout::compute_layout;
 pub use raster::{render_pdf, render_png};
 pub use render::render_svg;
-pub use webmcp::{build_submission as build_webmcp_submission, discover_tools as discover_webmcp_tools, WebMcpTool};
+pub use webmcp::{
+    build_submission as build_webmcp_submission, discover_tools as discover_webmcp_tools,
+    lint as lint_webmcp, LintFinding as WebMcpLintFinding, Severity as WebMcpLintSeverity, WebMcpTool,
+};
 
 /// Rewrites every relative link (`page.links` and each `Element.href`) into
 /// an absolute URL resolved against `base`. Hrefs that fail to parse (e.g.
@@ -158,6 +166,7 @@ struct ParsedAttrs {
     tool_autosubmit: bool,
     tool_param_description: Option<String>,
     required: bool,
+    method: Option<String>,
 }
 
 fn element_from_handle(handle: &Handle) -> Element {
@@ -186,6 +195,7 @@ fn element_from_handle(handle: &Handle) -> Element {
                 tool_autosubmit: has_attr("toolautosubmit"),
                 tool_param_description: attr("toolparamdescription"),
                 required: has_attr("required"),
+                method: attr("method"),
             }
         }
         NodeData::Document => ParsedAttrs { tag: "document".to_string(), ..Default::default() },
@@ -207,6 +217,7 @@ fn element_from_handle(handle: &Handle) -> Element {
             tool_autosubmit: attrs.tool_autosubmit,
             tool_param_description: attrs.tool_param_description,
             required: attrs.required,
+            method: attrs.method,
         };
     }
 
@@ -247,6 +258,7 @@ fn element_from_handle(handle: &Handle) -> Element {
         tool_autosubmit: attrs.tool_autosubmit,
         tool_param_description: attrs.tool_param_description,
         required: attrs.required,
+        method: attrs.method,
     }
 }
 

@@ -346,6 +346,35 @@ justo lo que kite-lite evita a propósito (ver "Próximas capas" más abajo).
 El envío del formulario es GET únicamente, sin cuerpo de request — la
 misma limitación que el submit por click.
 
+### Linter de WebMCP declarativo
+
+`kite-lite webmcp-lint <url|page.json|archivo.html> [--json]` valida los
+formularios `toolname="..."` de una página contra reglas prácticas, antes
+de publicarla:
+
+```bash
+cargo run -- webmcp-lint ./mi-pagina.html
+cargo run -- webmcp-lint https://mi-sitio.com/checkout
+cargo run -- webmcp-lint ./mi-pagina.html --json   # para consumir desde otro script
+```
+
+Chequeos, de más a menos grave:
+
+- **Error** (exit code ≠ 0, pensado para gatear CI): falta `tooldescription`;
+  hay dos formularios con el mismo `toolname` en la página (un agente no
+  puede distinguir cuál invocar).
+- **Warning**: `toolname` con caracteres fuera de `[A-Za-z0-9_-]` (algunos
+  backends de tool-calling lo rechazan); el formulario no tiene `action`;
+  un campo sin `name` (queda fuera del schema, invisible para el agente);
+  un `<select>` sin ninguna `<option>` (enum vacío).
+- **Info**: el formulario es `method="post"` — kite-lite solo puede simular
+  un submit GET, así que `browser_call_tool` no refleja el comportamiento
+  real; conviene probarlo también en un navegador con WebMCP nativo. Un
+  campo sin `toolparamdescription` (no es obligatorio, pero ayuda al agente).
+
+No reemplaza probarlo en un navegador real con WebMCP activo — es un
+chequeo rápido y local de los errores más comunes antes de llegar ahí.
+
 ## Despliegue en VPS
 
 El despliegue probado usa una imagen multi-stage y un usuario sin privilegios:
