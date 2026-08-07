@@ -1,0 +1,9 @@
+{
+  "name": "kite-lite-just-bash-demo",
+  "private": true,
+  "type": "module",
+  "description": "Registers kite-lite as a custom command inside a just-bash sandboxed shell",
+  "dependencies": {
+    "just-bash": "^3.2.0"
+  }
+}
