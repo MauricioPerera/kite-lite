@@ -22,7 +22,8 @@ El núcleo DOM en Rust:
   texto (word wrap) — ver la sección "Layout mínimo" para las limitaciones;
   permite click/escritura/submit de formularios por CDP sin ejecutar JS de
   la página — ver "Interacción: click, escritura y submit de formularios";
-  renderiza a PNG y PDF además de SVG — ver "Renderizado PNG/PDF".
+  renderiza a PNG y PDF además de SVG — ver "Renderizado PNG/PDF";
+  se puede correr como servidor MCP por stdio — ver "Servidor MCP".
 
 ## Probarlo
 
@@ -276,6 +277,45 @@ cliente CDP real primero hace `DOM.querySelector` y después
 `DOM.getBoxModel` para obtener las coordenadas — igual que Playwright/Chrome
 DevTools.
 
+## Servidor MCP
+
+`cargo run -- mcp` corre kite-lite como servidor MCP (Model Context Protocol)
+por stdio: JSON-RPC 2.0 delimitado por saltos de línea en stdin/stdout, el
+mismo transporte que usan Claude Desktop/Claude Code para lanzar herramientas
+locales. Implementado a mano con `serde_json` (sin SDK de MCP) — misma
+filosofía que el resto del proyecto con CDP: la superficie necesaria
+(`initialize`, `tools/list`, `tools/call`) es chica.
+
+Herramientas expuestas, todas sobre el motor ya existente:
+
+- `fetch_page(url)` — resumen liviano `{url, title, text, links}`, **no**
+  el árbol DOM completo con layout (sería demasiado JSON para el contexto
+  de un agente). No ejecuta JS de la página ni toca la sesión persistente.
+- `render_screenshot(url, format?)` — trae la URL y la renderiza a PNG
+  (imagen en base64) o SVG (texto). Mismas limitaciones que "Renderizado
+  PNG/PDF": sin fuentes en el sistema, sale en blanco.
+- `eval_js(url, script)` — trae la URL y evalúa JS aislado contra el
+  snapshot, mismo sandbox de siempre (sin red/filesystem/DOM real).
+- `browser_navigate(url)`, `browser_click(selector)`, `browser_type(text, selector?)`,
+  `browser_get_dom(selector?)`, `browser_screenshot(format?)` — una única
+  sesión de navegación persistente por proceso (como `cdp`, no
+  multi-pestaña), con cookies/redirecciones igual que el resto del
+  proyecto. `browser_click` reusa la misma lógica de
+  "Interacción: click, escritura y submit de formularios" pero ubicando el
+  elemento por selector en vez de coordenada `y` — más natural para una
+  herramienta MCP.
+
+Un error de una herramienta (selector que no matchea, fetch fallido, etc.)
+se devuelve como `isError: true` con el mensaje en el contenido — así el
+agente lo ve y puede reaccionar, en vez de que falle la llamada JSON-RPC
+completa.
+
+**Límite honesto:** esto se verificó hablando el protocolo a mano (un
+proceso real, mensajes JSON-RPC reales por stdin/stdout, igual rigor que
+las pruebas de CDP) — no se probó contra un cliente MCP real (Claude
+Desktop/Code) en esta sesión, así que confirma que el protocolo es
+correcto, no que un cliente específico lo acepte sin fricción.
+
 ## Despliegue en VPS
 
 El despliegue probado usa una imagen multi-stage y un usuario sin privilegios:
@@ -294,7 +334,12 @@ autenticación. No se recomienda exponerlo directamente a Internet.
 
 ## Próximas capas
 
-1. exponer kite-lite como servidor MCP (herramientas tipo `fetch_page`,
-   `click`, `type`, `render_png`, `eval`) — viable sin tocar la arquitectura
-   de aislamiento JS, a diferencia de Playwright real (ver "Compatibilidad
-   CDP" para el porqué de esa distinción).
+El roadmap original (fetcher/JS aislados, URLs/cookies/redirecciones,
+layout mínimo, interacción, PNG/PDF, compatibilidad CDP, servidor MCP) está
+completo. La limitación más grande que queda, y que no tiene una solución
+que no rompa el modelo de aislamiento de este proyecto: kite-lite no puede
+ver nada que dependa de JavaScript para renderizarse (SPAs, contenido
+cargado por fetch del lado cliente) — es la contracara directa de no tener
+un DOM vivo ligado a JS, la misma razón por la que ni la interacción real
+ni Playwright funcionan. No hay ítem de roadmap para esto porque resolverlo
+significaría abandonar esa decisión de diseño, no extenderla.

@@ -51,6 +51,21 @@ async fn main() -> Result<()> {
         return cdp_command(&args);
     }
 
+    if args.get(1).map(String::as_str) == Some("mcp") {
+        // mcp_command makes blocking HTTP requests (fetch_page,
+        // browser_navigate, ...). Those panic if attempted directly on a
+        // tokio worker thread — same issue as reqwest::blocking::Client
+        // construction elsewhere in this file, but here it bites on every
+        // *use* of the client, not just building it, since the whole
+        // request-handling loop lives on the async main task. Running it
+        // on a plain OS thread (like handle_cdp already does for its own
+        // per-connection blocking calls) sidesteps the tokio runtime
+        // entirely instead of needing block_in_place around every call.
+        return std::thread::spawn(mcp_command)
+            .join()
+            .map_err(|_| anyhow::anyhow!("mcp thread panicked"))?;
+    }
+
     let url = args.get(1).context(
         "usage: kite-lite <url> [--svg|--png|--pdf output] [--js code]",
     )?;
@@ -819,9 +834,17 @@ enum ClickAction {
 
 fn plan_click(page: &kite_lite_core::Page, y: f64) -> ClickAction {
     let mut next_id = 1;
-    let Some(hit_id) = hit_test(&page.root, y, &mut next_id) else {
-        return ClickAction::None;
-    };
+    match hit_test(&page.root, y, &mut next_id) {
+        Some(hit_id) => plan_action_for_node(page, hit_id),
+        None => ClickAction::None,
+    }
+}
+
+/// The part of `plan_click` that decides what to do once a target node id
+/// is already known — shared with selector-based clicking (`browser_click`
+/// in MCP mode), which finds its target via `find_selector` instead of a
+/// `y` coordinate.
+fn plan_action_for_node(page: &kite_lite_core::Page, hit_id: u32) -> ClickAction {
     let mut next_id = 1;
     let Some(hit) = find_node(&page.root, hit_id, &mut next_id) else {
         return ClickAction::None;
@@ -883,7 +906,12 @@ fn collect_form_fields(element: &kite_lite_core::Element, fields: &mut Vec<(Stri
 }
 
 fn dispatch_click(session: &mut CdpSession, y: f64) -> serde_json::Value {
-    match plan_click(&session.page, y) {
+    let action = plan_click(&session.page, y);
+    apply_click_action(session, action)
+}
+
+fn apply_click_action(session: &mut CdpSession, action: ClickAction) -> serde_json::Value {
+    match action {
         ClickAction::Navigate(url) => navigate_page(session, &url),
         ClickAction::Focus(node_id) => {
             session.focused_node_id = Some(node_id);
@@ -1068,6 +1096,366 @@ fn evaluate_js_in_child(
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Runs kite-lite as an MCP (Model Context Protocol) server over stdio:
+/// newline-delimited JSON-RPC 2.0 on stdin/stdout, per the MCP spec's stdio
+/// transport. Hand-rolled with `serde_json` rather than an MCP SDK crate,
+/// matching how this project already hand-rolls the CDP protocol — the
+/// surface needed (`initialize`, `tools/list`, `tools/call`) is small.
+///
+/// stdio framing means stdout must carry *only* protocol messages, one JSON
+/// object per line — any diagnostic output must go to stderr instead, or a
+/// client reading stdout as JSON-RPC would choke on it.
+///
+/// This mode is inherently single-connection and sequential (one request
+/// in, one response out, over one pair of pipes), so unlike `cdp`/`serve`
+/// there's no concurrency to isolate: `mcp_command` runs as one plain
+/// function call, on a dedicated OS thread spawned from `main()` (see the
+/// call site) specifically so its blocking HTTP calls never touch the
+/// tokio runtime — and per-request state (the persistent `browser_*`
+/// session) is just a local variable.
+fn mcp_command() -> Result<()> {
+    use std::io::BufRead;
+
+    let fetch_client = reqwest::blocking::Client::builder().cookie_store(true).build()?;
+    let browser_client = reqwest::blocking::Client::builder().cookie_store(true).build()?;
+    let mut session = CdpSession {
+        page: parse_html("<title>New Page</title><body></body>"),
+        client: browser_client,
+        focused_node_id: None,
+    };
+
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    eprintln!("kite-lite MCP server ready on stdio");
+
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let request: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("mcp: failed to parse request: {error}");
+                continue;
+            }
+        };
+        // A message with no "id" is a notification (e.g.
+        // notifications/initialized) — no response is expected or sent.
+        let Some(id) = request.get("id").cloned() else {
+            continue;
+        };
+        let method = request
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+
+        let envelope = match mcp_dispatch(method, request.get("params"), &fetch_client, &mut session) {
+            Ok(result) => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}),
+            Err((code, message)) => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": code, "message": message}
+            }),
+        };
+        writeln!(stdout, "{}", serde_json::to_string(&envelope)?)?;
+        stdout.flush()?;
+    }
+    Ok(())
+}
+
+fn mcp_dispatch(
+    method: &str,
+    params: Option<&serde_json::Value>,
+    fetch_client: &reqwest::blocking::Client,
+    session: &mut CdpSession,
+) -> std::result::Result<serde_json::Value, (i64, String)> {
+    match method {
+        "initialize" => Ok(serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "kite-lite", "version": env!("CARGO_PKG_VERSION")}
+        })),
+        "tools/list" => Ok(serde_json::json!({"tools": mcp_tool_definitions()})),
+        "tools/call" => mcp_tool_call(params, fetch_client, session),
+        "ping" => Ok(serde_json::json!({})),
+        _ => Err((-32601, format!("method not found: {method}"))),
+    }
+}
+
+fn mcp_tool_definitions() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "fetch_page",
+            "description": "Fetch a URL and return a lightweight summary (final URL, title, extracted text, links). Does not execute the page's own JavaScript and does not affect the persistent browser_* session.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"url": {"type": "string", "description": "The URL to fetch"}},
+                "required": ["url"]
+            }
+        }),
+        serde_json::json!({
+            "name": "render_screenshot",
+            "description": "Fetch a URL and render it to a PNG image or SVG markup. This is a simplified, text-driven rendering (no CSS, no JavaScript-rendered content), not pixel-accurate to a real browser.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "format": {"type": "string", "enum": ["png", "svg"], "description": "Defaults to png"}
+                },
+                "required": ["url"]
+            }
+        }),
+        serde_json::json!({
+            "name": "eval_js",
+            "description": "Fetch a URL and evaluate a JavaScript expression against a read-only snapshot of its document (document.title, document.body.innerText, and a limited document.querySelector for the first h1/h2/h3/p/a/button). Runs in an isolated process with no network, filesystem, or real-DOM access, and cannot affect the page.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "script": {"type": "string"}
+                },
+                "required": ["url", "script"]
+            }
+        }),
+        serde_json::json!({
+            "name": "browser_navigate",
+            "description": "Navigate the persistent browsing session to a URL, following redirects and carrying cookies from prior navigations in this same session. Returns a page summary.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+                "required": ["url"]
+            }
+        }),
+        serde_json::json!({
+            "name": "browser_click",
+            "description": "Click the first element in the current session page matching a CSS-like selector (tag name). Clicking <a href> navigates; clicking <input>/<textarea> focuses it for browser_type; clicking a submit button or input[type=submit] submits its enclosing form (GET only, no request body) and navigates. This does not run onclick handlers or any page JavaScript.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"selector": {"type": "string"}},
+                "required": ["selector"]
+            }
+        }),
+        serde_json::json!({
+            "name": "browser_type",
+            "description": "Type text into the currently focused input/textarea in the session (focus one first with browser_click, or pass 'selector' here to focus it in the same call).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "selector": {"type": "string", "description": "Optional: focus this element before typing"}
+                },
+                "required": ["text"]
+            }
+        }),
+        serde_json::json!({
+            "name": "browser_get_dom",
+            "description": "Return the outer HTML of the current session page, or of the first element matching a selector.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"selector": {"type": "string"}}
+            }
+        }),
+        serde_json::json!({
+            "name": "browser_screenshot",
+            "description": "Render the current session page (as last navigated by browser_navigate) to a PNG image or SVG markup.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"format": {"type": "string", "enum": ["png", "svg"]}}
+            }
+        }),
+    ]
+}
+
+fn mcp_tool_call(
+    params: Option<&serde_json::Value>,
+    fetch_client: &reqwest::blocking::Client,
+    session: &mut CdpSession,
+) -> std::result::Result<serde_json::Value, (i64, String)> {
+    let name = params
+        .and_then(|p| p.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or((-32602, "missing tool name".to_string()))?;
+    let empty = serde_json::json!({});
+    let arguments = params.and_then(|p| p.get("arguments")).unwrap_or(&empty);
+
+    let result = match name {
+        "fetch_page" => mcp_fetch_page(fetch_client, arguments),
+        "render_screenshot" => mcp_render_screenshot(fetch_client, arguments),
+        "eval_js" => mcp_eval_js(fetch_client, arguments),
+        "browser_navigate" => mcp_browser_navigate(session, arguments),
+        "browser_click" => mcp_browser_click(session, arguments),
+        "browser_type" => mcp_browser_type(session, arguments),
+        "browser_get_dom" => mcp_browser_get_dom(session, arguments),
+        "browser_screenshot" => mcp_browser_screenshot(session, arguments),
+        _ => return Err((-32602, format!("unknown tool: {name}"))),
+    };
+
+    match result {
+        Ok(content) => Ok(serde_json::json!({"content": [content], "isError": false})),
+        Err(message) => Ok(serde_json::json!({
+            "content": [{"type": "text", "text": message}],
+            "isError": true
+        })),
+    }
+}
+
+fn require_str<'a>(arguments: &'a serde_json::Value, key: &str) -> std::result::Result<&'a str, String> {
+    arguments
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("missing '{key}' argument"))
+}
+
+fn page_summary(page: &kite_lite_core::Page) -> serde_json::Value {
+    serde_json::json!({
+        "url": page.url,
+        "title": page.title,
+        "text": page.text,
+        "links": page.links,
+    })
+}
+
+fn text_content(text: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({"type": "text", "text": text.into()})
+}
+
+/// Blocking-client equivalent of `fetch_page` (the async fn used by the CLI
+/// path), so MCP's tool handlers can stay plain synchronous functions.
+fn fetch_page_blocking(client: &reqwest::blocking::Client, url: &str) -> Result<kite_lite_core::Page> {
+    let response = client.get(url).send()?.error_for_status()?;
+    let final_url = response.url().to_string();
+    let html = response.text()?;
+    let mut page = parse_html(&html);
+    page.url = Some(final_url.clone());
+    resolve_links(&mut page, &final_url);
+    compute_layout(&mut page, DEFAULT_VIEWPORT_WIDTH);
+    Ok(page)
+}
+
+fn render_page_as_content(page: &kite_lite_core::Page, format: &str) -> std::result::Result<serde_json::Value, String> {
+    if format == "svg" {
+        return Ok(text_content(render_svg(page, 1024)));
+    }
+    let png = render_png(page, 1024).map_err(|error| error.to_string())?;
+    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, png);
+    Ok(serde_json::json!({"type": "image", "data": encoded, "mimeType": "image/png"}))
+}
+
+fn mcp_fetch_page(
+    client: &reqwest::blocking::Client,
+    arguments: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    let url = require_str(arguments, "url")?;
+    let page = fetch_page_blocking(client, url).map_err(|error| error.to_string())?;
+    Ok(text_content(page_summary(&page).to_string()))
+}
+
+fn mcp_render_screenshot(
+    client: &reqwest::blocking::Client,
+    arguments: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    let url = require_str(arguments, "url")?;
+    let format = arguments.get("format").and_then(serde_json::Value::as_str).unwrap_or("png");
+    let page = fetch_page_blocking(client, url).map_err(|error| error.to_string())?;
+    render_page_as_content(&page, format)
+}
+
+fn mcp_eval_js(
+    client: &reqwest::blocking::Client,
+    arguments: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    let url = require_str(arguments, "url")?;
+    let script = require_str(arguments, "script")?;
+    let page = fetch_page_blocking(client, url).map_err(|error| error.to_string())?;
+    let value = evaluate_js_in_child(&page, script, JS_TIMEOUT).map_err(|error| error.to_string())?;
+    Ok(text_content(value))
+}
+
+fn mcp_browser_navigate(
+    session: &mut CdpSession,
+    arguments: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    let url = require_str(arguments, "url")?;
+    let outcome = navigate_page(session, url);
+    if let Some(error_text) = outcome.get("errorText").and_then(serde_json::Value::as_str) {
+        return Err(error_text.to_string());
+    }
+    Ok(text_content(page_summary(&session.page).to_string()))
+}
+
+fn mcp_browser_click(
+    session: &mut CdpSession,
+    arguments: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    let selector = require_str(arguments, "selector")?;
+    let mut next_id = 1;
+    let Some(node_id) = find_selector(&session.page.root, selector, &mut next_id) else {
+        return Err(format!("no element matches selector '{selector}'"));
+    };
+    let action = plan_action_for_node(&session.page, node_id);
+    let navigated = matches!(action, ClickAction::Navigate(_) | ClickAction::Submit { .. });
+    let outcome = apply_click_action(session, action);
+    if let Some(error_text) = outcome.get("errorText").and_then(serde_json::Value::as_str) {
+        return Err(error_text.to_string());
+    }
+    let summary = if navigated {
+        serde_json::json!({"action": "navigated", "page": page_summary(&session.page)})
+    } else if session.focused_node_id == Some(node_id) {
+        serde_json::json!({"action": "focused"})
+    } else {
+        serde_json::json!({"action": "none"})
+    };
+    Ok(text_content(summary.to_string()))
+}
+
+fn mcp_browser_type(
+    session: &mut CdpSession,
+    arguments: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    let text = require_str(arguments, "text")?;
+    if let Some(selector) = arguments.get("selector").and_then(serde_json::Value::as_str) {
+        let mut next_id = 1;
+        let Some(node_id) = find_selector(&session.page.root, selector, &mut next_id) else {
+            return Err(format!("no element matches selector '{selector}'"));
+        };
+        session.focused_node_id = Some(node_id);
+    }
+    if session.focused_node_id.is_none() {
+        return Err("no focused input — click one first, or pass 'selector'".to_string());
+    }
+    dispatch_key(session, "char", Some(text), None);
+    Ok(text_content("ok"))
+}
+
+fn mcp_browser_get_dom(
+    session: &mut CdpSession,
+    arguments: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    match arguments.get("selector").and_then(serde_json::Value::as_str) {
+        Some(selector) => {
+            let mut next_id = 1;
+            let Some(node_id) = find_selector(&session.page.root, selector, &mut next_id) else {
+                return Err(format!("no element matches selector '{selector}'"));
+            };
+            let mut next_id = 1;
+            let html = find_node(&session.page.root, node_id, &mut next_id)
+                .map(element_html)
+                .unwrap_or_default();
+            Ok(text_content(html))
+        }
+        None => Ok(text_content(element_html(&session.page.root))),
+    }
+}
+
+fn mcp_browser_screenshot(
+    session: &mut CdpSession,
+    arguments: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    let format = arguments.get("format").and_then(serde_json::Value::as_str).unwrap_or("png");
+    render_page_as_content(&session.page, format)
 }
 
 #[cfg(test)]

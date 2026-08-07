@@ -5,10 +5,10 @@
 //! by `eval`/`serve`/CDP's `Runtime.evaluate` can only be exercised here,
 //! via `CARGO_BIN_EXE_kite-lite`, which Cargo only sets for `tests/`.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -752,4 +752,180 @@ fn cdp_auto_attach_emits_session_and_sessions_get_echoed() {
     let response = read_json_message(&mut socket);
     assert_eq!(response["sessionId"], session_id);
     assert_eq!(response["result"]["result"]["value"], "2");
+}
+
+/// Drives `kite-lite mcp` as a real subprocess over its stdio JSON-RPC
+/// transport — the same way an MCP client (Claude Desktop, Claude Code)
+/// would, one newline-delimited JSON object per message.
+struct McpClient {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl McpClient {
+    fn start() -> Self {
+        let mut child = Command::new(bin_path())
+            .arg("mcp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to start kite-lite mcp");
+        let stdin = child.stdin.take().expect("missing mcp stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("missing mcp stdout"));
+        let mut client = Self { child, stdin, stdout };
+        let init = client.send(
+            0,
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "kite-lite-test", "version": "0"}
+            }),
+        );
+        assert_eq!(
+            init["result"]["serverInfo"]["name"], "kite-lite",
+            "unexpected initialize response: {init:?}"
+        );
+        client
+    }
+
+    fn send(&mut self, id: u64, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let request = serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        writeln!(self.stdin, "{request}").expect("failed to write mcp request");
+        self.stdin.flush().expect("failed to flush mcp stdin");
+        let mut line = String::new();
+        self.stdout
+            .read_line(&mut line)
+            .expect("failed to read mcp response");
+        assert!(!line.is_empty(), "mcp server closed stdout unexpectedly");
+        serde_json::from_str(&line).unwrap_or_else(|error| {
+            panic!("invalid mcp response JSON: {error}\nline: {line}")
+        })
+    }
+
+    fn call_tool(&mut self, id: u64, name: &str, arguments: serde_json::Value) -> serde_json::Value {
+        self.send(id, "tools/call", serde_json::json!({"name": name, "arguments": arguments}))
+    }
+}
+
+impl Drop for McpClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn mcp_initialize_and_list_tools() {
+    let mut mcp = McpClient::start();
+    let list = mcp.send(1, "tools/list", serde_json::json!({}));
+    let tools = list["result"]["tools"].as_array().expect("tools/list missing tools array");
+    let names: Vec<&str> = tools.iter().filter_map(|tool| tool["name"].as_str()).collect();
+    for expected in ["fetch_page", "render_screenshot", "eval_js", "browser_navigate", "browser_click", "browser_type", "browser_get_dom", "browser_screenshot"] {
+        assert!(names.contains(&expected), "missing tool '{expected}' in {names:?}");
+    }
+}
+
+#[test]
+fn mcp_fetch_page_returns_a_lightweight_summary() {
+    let port = 19031;
+    spawn_interaction_server(port);
+    wait_for_port(port);
+
+    let mut mcp = McpClient::start();
+    let response = mcp.call_tool(2, "fetch_page", serde_json::json!({"url": format!("http://127.0.0.1:{port}/")}));
+    assert_eq!(response["result"]["isError"], false, "{response:?}");
+    let text = response["result"]["content"][0]["text"].as_str().expect("missing text content");
+    let summary: serde_json::Value = serde_json::from_str(text).expect("fetch_page text is not JSON");
+    assert_eq!(summary["title"], "Home");
+    assert!(summary.get("root").is_none(), "summary should not include the full DOM tree");
+}
+
+#[test]
+fn mcp_render_screenshot_returns_base64_png_image_content() {
+    let port = 19033;
+    spawn_interaction_server(port);
+    wait_for_port(port);
+
+    let mut mcp = McpClient::start();
+    let response = mcp.call_tool(2, "render_screenshot", serde_json::json!({"url": format!("http://127.0.0.1:{port}/")}));
+    let content = &response["result"]["content"][0];
+    assert_eq!(content["type"], "image");
+    assert_eq!(content["mimeType"], "image/png");
+    let data = content["data"].as_str().expect("missing base64 image data");
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .expect("image data is not valid base64");
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+}
+
+#[test]
+fn mcp_eval_js_runs_against_an_isolated_snapshot() {
+    let port = 19034;
+    spawn_interaction_server(port);
+    wait_for_port(port);
+
+    let mut mcp = McpClient::start();
+    let response = mcp.call_tool(
+        2,
+        "eval_js",
+        serde_json::json!({"url": format!("http://127.0.0.1:{port}/"), "script": "document.title"}),
+    );
+    assert_eq!(response["result"]["isError"], false, "{response:?}");
+    assert_eq!(response["result"]["content"][0]["text"], "Home");
+}
+
+#[test]
+fn mcp_browser_session_navigates_clicks_and_submits_a_form() {
+    let port = 19035;
+    spawn_interaction_server(port);
+    wait_for_port(port);
+
+    let mut mcp = McpClient::start();
+
+    let nav = mcp.call_tool(2, "browser_navigate", serde_json::json!({"url": format!("http://127.0.0.1:{port}/")}));
+    assert_eq!(nav["result"]["isError"], false, "{nav:?}");
+
+    let click = mcp.call_tool(3, "browser_click", serde_json::json!({"selector": "a"}));
+    assert_eq!(click["result"]["isError"], false, "{click:?}");
+    let click_summary: serde_json::Value =
+        serde_json::from_str(click["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(click_summary["action"], "navigated");
+    assert_eq!(click_summary["page"]["title"], "Landed");
+
+    // Back to the form page: focus the input by selector while typing, then
+    // click submit and confirm the field's value made it into the query
+    // string the mock server received.
+    mcp.call_tool(4, "browser_navigate", serde_json::json!({"url": format!("http://127.0.0.1:{port}/")}));
+    let typed = mcp.call_tool(5, "browser_type", serde_json::json!({"selector": "input", "text": "rust"}));
+    assert_eq!(typed["result"]["isError"], false, "{typed:?}");
+
+    let submit = mcp.call_tool(6, "browser_click", serde_json::json!({"selector": "button"}));
+    assert_eq!(submit["result"]["isError"], false, "{submit:?}");
+    let submit_summary: serde_json::Value =
+        serde_json::from_str(submit["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(submit_summary["page"]["title"], "Results: rust");
+}
+
+#[test]
+fn mcp_browser_get_dom_and_unknown_selector_error() {
+    let port = 19036;
+    spawn_interaction_server(port);
+    wait_for_port(port);
+
+    let mut mcp = McpClient::start();
+    mcp.call_tool(2, "browser_navigate", serde_json::json!({"url": format!("http://127.0.0.1:{port}/")}));
+
+    let dom = mcp.call_tool(3, "browser_get_dom", serde_json::json!({"selector": "a"}));
+    assert_eq!(dom["result"]["isError"], false, "{dom:?}");
+    assert_eq!(
+        dom["result"]["content"][0]["text"],
+        format!("<a href=\"http://127.0.0.1:{port}/target\">Go</a>")
+    );
+
+    let missing = mcp.call_tool(4, "browser_click", serde_json::json!({"selector": "video"}));
+    assert_eq!(missing["result"]["isError"], true, "{missing:?}");
 }
