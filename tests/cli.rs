@@ -572,11 +572,18 @@ fn spawn_interaction_server(port: u16) {
                         params.get("model").cloned().unwrap_or_default()
                     )
                 }
+                "/with-cookie" => "<title>Has cookies</title>".to_string(),
                 _ => String::new(),
             };
             let status = if body.is_empty() { "404 Not Found" } else { "200 OK" };
+            let extra_headers = if route == "/with-cookie" {
+                "Set-Cookie: session=abc123; Path=/; HttpOnly; Secure; SameSite=Lax\r\n\
+                 Set-Cookie: tracking=xyz789\r\n"
+            } else {
+                ""
+            };
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\nContent-Type: text/html\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             let _ = stream.write_all(response.as_bytes());
@@ -1307,4 +1314,42 @@ fn seo_lint_works_against_a_live_url() {
 
     assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
     assert!(String::from_utf8_lossy(&output.stdout).contains("muy corto"));
+}
+
+#[test]
+fn mcp_fetch_page_reports_set_cookie_headers() {
+    let port = 19042;
+    spawn_interaction_server(port);
+    wait_for_port(port);
+
+    let mut mcp = McpClient::start();
+    let response = mcp.call_tool(2, "fetch_page", serde_json::json!({"url": format!("http://127.0.0.1:{port}/with-cookie")}));
+    assert_eq!(response["result"]["isError"], false, "{response:?}");
+    let summary: serde_json::Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let cookies = summary["cookies"].as_array().expect("missing cookies array");
+    assert_eq!(cookies.len(), 2);
+    assert_eq!(cookies[0]["name"], "session");
+    assert_eq!(cookies[0]["value"], "abc123");
+    assert_eq!(cookies[0]["http_only"], true);
+    assert_eq!(cookies[1]["name"], "tracking");
+    assert_eq!(cookies[1]["value"], "xyz789");
+}
+
+#[test]
+fn mcp_browser_navigate_reports_set_cookie_headers() {
+    let port = 19043;
+    spawn_interaction_server(port);
+    wait_for_port(port);
+
+    let mut mcp = McpClient::start();
+    let nav = mcp.call_tool(2, "browser_navigate", serde_json::json!({"url": format!("http://127.0.0.1:{port}/with-cookie")}));
+    assert_eq!(nav["result"]["isError"], false, "{nav:?}");
+    let summary: serde_json::Value =
+        serde_json::from_str(nav["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let cookies = summary["cookies"].as_array().expect("missing cookies array");
+    assert_eq!(cookies.len(), 2);
+    assert_eq!(cookies[0]["name"], "session");
+    assert_eq!(cookies[0]["domain"], serde_json::Value::Null);
+    assert_eq!(cookies[0]["path"], "/");
 }

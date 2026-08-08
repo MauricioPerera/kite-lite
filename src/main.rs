@@ -129,12 +129,27 @@ fn http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder().cookie_store(true).build()?)
 }
 
+/// Parses every `Set-Cookie` header on a response — reqwest's own
+/// `cookie_store` tracks these internally for outgoing requests but
+/// never exposes them, so this is the only way to actually see what a
+/// page tried to set.
+fn extract_cookies(headers: &reqwest::header::HeaderMap) -> Vec<kite_lite_core::CookieInfo> {
+    headers
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(kite_lite_core::parse_set_cookie)
+        .collect()
+}
+
 async fn fetch_page(client: &reqwest::Client, url: &str) -> Result<kite_lite_core::Page> {
     let response = client.get(url).send().await?.error_for_status()?;
     let final_url = response.url().to_string();
+    let cookies = extract_cookies(response.headers());
     let html = response.text().await?;
     let mut page = parse_html(&html);
     page.url = Some(final_url.clone());
+    page.cookies = cookies;
     resolve_links(&mut page, &final_url);
     compute_layout(&mut page, DEFAULT_VIEWPORT_WIDTH);
     Ok(page)
@@ -824,10 +839,12 @@ fn navigate_page(session: &mut CdpSession, url: &str) -> serde_json::Value {
     {
         Ok(response) => {
             let final_url = response.url().to_string();
+            let cookies = extract_cookies(response.headers());
             match response.text() {
                 Ok(html) => {
                     let mut page = parse_html(&html);
                     page.url = Some(final_url.clone());
+                    page.cookies = cookies;
                     resolve_links(&mut page, &final_url);
                     compute_layout(&mut page, DEFAULT_VIEWPORT_WIDTH);
                     session.page = page;
@@ -1522,6 +1539,9 @@ fn page_summary(page: &kite_lite_core::Page) -> serde_json::Value {
     if !tools.is_empty() {
         summary["tools"] = serde_json::Value::Array(tools.iter().map(webmcp_tool_json).collect());
     }
+    if !page.cookies.is_empty() {
+        summary["cookies"] = serde_json::to_value(&page.cookies).unwrap_or_default();
+    }
     summary
 }
 
@@ -1543,9 +1563,11 @@ fn text_content(text: impl Into<String>) -> serde_json::Value {
 fn fetch_page_blocking(client: &reqwest::blocking::Client, url: &str) -> Result<kite_lite_core::Page> {
     let response = client.get(url).send()?.error_for_status()?;
     let final_url = response.url().to_string();
+    let cookies = extract_cookies(response.headers());
     let html = response.text()?;
     let mut page = parse_html(&html);
     page.url = Some(final_url.clone());
+    page.cookies = cookies;
     resolve_links(&mut page, &final_url);
     compute_layout(&mut page, DEFAULT_VIEWPORT_WIDTH);
     Ok(page)

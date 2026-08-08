@@ -101,8 +101,74 @@ pub struct Page {
     /// meta tags surface.
     #[serde(default)]
     pub meta: Vec<(String, String)>,
+    /// Cookies set by the server on this fetch/navigation, parsed from
+    /// each `Set-Cookie` response header — see `parse_set_cookie`. Empty
+    /// for anything not backed by a real HTTP response (`parse_html`
+    /// alone never populates this; only `fetch_page`/`navigate_page` in
+    /// main.rs do, since they're the ones holding the response headers).
+    #[serde(default)]
+    pub cookies: Vec<CookieInfo>,
     #[serde(skip)]
     pub source: Option<String>,
+}
+
+/// A cookie parsed from one `Set-Cookie` response header — see
+/// `parse_set_cookie`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CookieInfo {
+    pub name: String,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub secure: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub http_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_site: Option<String>,
+}
+
+/// Parses one raw `Set-Cookie` header value (RFC 6265) into structured
+/// fields. A hand-rolled parser (no cookie crate dependency) covering
+/// the common case: `name=value; Attr=val; Flag`. Returns `None` for a
+/// header with no `name=value` pair at all.
+pub fn parse_set_cookie(raw: &str) -> Option<CookieInfo> {
+    let mut parts = raw.split(';');
+    let (name, value) = parts.next()?.trim().split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    let mut cookie = CookieInfo {
+        name: name.to_string(),
+        value: value.trim().to_string(),
+        domain: None,
+        path: None,
+        secure: false,
+        http_only: false,
+        same_site: None,
+    };
+    for part in parts {
+        let part = part.trim();
+        if let Some((key, val)) = part.split_once('=') {
+            match key.trim().to_ascii_lowercase().as_str() {
+                "domain" => cookie.domain = Some(val.trim().to_string()),
+                "path" => cookie.path = Some(val.trim().to_string()),
+                "samesite" => cookie.same_site = Some(val.trim().to_string()),
+                _ => {}
+            }
+        } else {
+            match part.to_ascii_lowercase().as_str() {
+                "secure" => cookie.secure = true,
+                "httponly" => cookie.http_only = true,
+                _ => {}
+            }
+        }
+    }
+    Some(cookie)
 }
 
 /// The JSON contract between a fetcher/CLI process and the isolated
@@ -174,6 +240,7 @@ pub fn parse_html(source: &str) -> Page {
         links,
         root,
         meta,
+        cookies: Vec::new(),
         source: Some(source.to_string()),
     }
 }
@@ -363,7 +430,7 @@ fn normalize_text(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_html, resolve_links, Element};
+    use super::{parse_html, parse_set_cookie, resolve_links, Element};
 
     #[test]
     fn extracts_agent_useful_page_data() {
@@ -448,5 +515,43 @@ mod tests {
         resolve_links(&mut page, "https://example.com/dir/index.html");
         let form = find_by_tag(&page.root, "form").expect("form missing");
         assert_eq!(form.href.as_deref(), Some("https://example.com/search"));
+    }
+
+    #[test]
+    fn parses_a_simple_cookie_with_no_attributes() {
+        let cookie = parse_set_cookie("session=abc123").expect("should parse");
+        assert_eq!(cookie.name, "session");
+        assert_eq!(cookie.value, "abc123");
+        assert!(!cookie.secure);
+        assert!(!cookie.http_only);
+        assert!(cookie.domain.is_none());
+    }
+
+    #[test]
+    fn parses_all_common_attributes_and_flags() {
+        let cookie = parse_set_cookie(
+            "session=abc123; Path=/; Domain=example.com; Secure; HttpOnly; SameSite=Lax",
+        )
+        .expect("should parse");
+        assert_eq!(cookie.name, "session");
+        assert_eq!(cookie.value, "abc123");
+        assert_eq!(cookie.path.as_deref(), Some("/"));
+        assert_eq!(cookie.domain.as_deref(), Some("example.com"));
+        assert!(cookie.secure);
+        assert!(cookie.http_only);
+        assert_eq!(cookie.same_site.as_deref(), Some("Lax"));
+    }
+
+    #[test]
+    fn value_may_contain_further_equals_signs() {
+        let cookie = parse_set_cookie("token=abc=def==; Path=/").expect("should parse");
+        assert_eq!(cookie.name, "token");
+        assert_eq!(cookie.value, "abc=def==");
+    }
+
+    #[test]
+    fn rejects_a_header_with_no_name_value_pair() {
+        assert!(parse_set_cookie("").is_none());
+        assert!(parse_set_cookie("justsometext").is_none());
     }
 }

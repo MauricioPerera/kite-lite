@@ -210,6 +210,15 @@ autenticado entre una página de login y las siguientes. `Runtime.evaluate`
 sólo expone un snapshot reducido del documento; no proporciona `fetch`,
 filesystem ni bindings del host.
 
+Además de reenviarse automáticamente, cada cookie que el servidor
+establece (cabecera `Set-Cookie`) queda expuesta en `Page.cookies`
+(nombre, valor, y flags como `domain`/`path`/`secure`/`http_only`/
+`same_site` si vienen) — antes solo vivía dentro del cookie jar interno
+de `reqwest`, sin forma de leerla. `fetch_page` y `browser_navigate` del
+MCP incluyen este campo cuando hay cookies. Límite: solo ve cookies de
+cabeceras HTTP en los fetches que hace kite-lite — no cookies que
+pondría JS de la página, que no se ejecuta.
+
 Ejemplo conceptual de una llamada CDP:
 
 ```json
