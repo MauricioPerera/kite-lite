@@ -28,6 +28,25 @@ const DEFAULT_VIEWPORT_WIDTH: f64 = 1024.0;
 const CDP_SESSION_ID: &str = "kite-lite-session";
 const CDP_TARGET_ID: &str = "kite-lite-target";
 
+/// Presented on every outbound fetch. reqwest's own default UA
+/// ("reqwest/x.y.z") is the cheapest possible signal for a WAF to filter
+/// on, so every real request looks like a normal browser instead. This
+/// only clears header-based filtering -- it does nothing against
+/// TLS/JA3-level fingerprinting or JS-gated challenge pages.
+const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+fn browser_like_headers() -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::ACCEPT,
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+            .parse()
+            .unwrap(),
+    );
+    headers.insert(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9".parse().unwrap());
+    headers
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -126,7 +145,11 @@ async fn main() -> Result<()> {
 }
 
 fn http_client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder().cookie_store(true).build()?)
+    Ok(reqwest::Client::builder()
+        .cookie_store(true)
+        .user_agent(BROWSER_USER_AGENT)
+        .default_headers(browser_like_headers())
+        .build()?)
 }
 
 /// Parses every `Set-Cookie` header on a response — reqwest's own
@@ -444,7 +467,11 @@ fn cdp_command(args: &[String]) -> Result<()> {
     // if attempted directly on a tokio worker thread — block_in_place hands
     // this thread off so that's safe.
     let client = tokio::task::block_in_place(|| {
-        reqwest::blocking::Client::builder().cookie_store(true).build()
+        reqwest::blocking::Client::builder()
+            .cookie_store(true)
+            .user_agent(BROWSER_USER_AGENT)
+            .default_headers(browser_like_headers())
+            .build()
     })?;
     let session = CdpSession { page, client, focused_node_id: None };
     let session = Arc::new(Mutex::new(session));
@@ -1324,8 +1351,16 @@ fn evaluate_js_in_child(
 fn mcp_command() -> Result<()> {
     use std::io::BufRead;
 
-    let fetch_client = reqwest::blocking::Client::builder().cookie_store(true).build()?;
-    let browser_client = reqwest::blocking::Client::builder().cookie_store(true).build()?;
+    let fetch_client = reqwest::blocking::Client::builder()
+        .cookie_store(true)
+        .user_agent(BROWSER_USER_AGENT)
+        .default_headers(browser_like_headers())
+        .build()?;
+    let browser_client = reqwest::blocking::Client::builder()
+        .cookie_store(true)
+        .user_agent(BROWSER_USER_AGENT)
+        .default_headers(browser_like_headers())
+        .build()?;
     let mut session = CdpSession {
         page: parse_html("<title>New Page</title><body></body>"),
         client: browser_client,

@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "A lightweight, agent-first web page engine"
 license = "MIT"
+repository = "https://github.com/MauricioPerera/kite-lite"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1"

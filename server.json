@@ -1,0 +1,29 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.MauricioPerera/kite-lite",
+  "title": "kite-lite",
+  "description": "Fetch, parse, screenshot and browse pages via MCP without a real browser -- no JS execution.",
+  "version": "0.1.0",
+  "websiteUrl": "https://github.com/MauricioPerera/kite-lite",
+  "repository": {
+    "url": "https://github.com/MauricioPerera/kite-lite",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "cargo",
+      "registryBaseUrl": "https://crates.io",
+      "identifier": "kite-lite",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ]
+    }
+  ]
+}
