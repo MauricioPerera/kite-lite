@@ -10,38 +10,17 @@ Env override: KITE_LITE_BIN (path to the kite-lite binary).
 """
 
 import base64
-import json
-import os
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_BINARY = REPO_ROOT / "target" / "release" / (
-    "kite-lite.exe" if os.name == "nt" else "kite-lite"
-)
-BINARY = os.environ.get("KITE_LITE_BIN", str(DEFAULT_BINARY))
+from _kite_lite import FetchError, fetch_page, render_png
 
 
 def fetch_title(url):
-    proc = subprocess.run([BINARY, "fetch", url], capture_output=True, text=True, timeout=30)
-    if proc.returncode != 0:
-        return None
-    return json.loads(proc.stdout).get("title")
-
-
-def render_png(url):
-    fd, path = tempfile.mkstemp(suffix=".png")
-    os.close(fd)
-    os.chmod(path, 0o666)
     try:
-        proc = subprocess.run([BINARY, url, "--png", path], capture_output=True, text=True, timeout=30)
-        if proc.returncode != 0:
-            raise RuntimeError(proc.stderr.strip() or f"exit code {proc.returncode}")
-        return Path(path).read_bytes()
-    finally:
-        os.unlink(path)
+        return fetch_page(url).get("title")
+    except FetchError:
+        return None
 
 
 def escape(text):

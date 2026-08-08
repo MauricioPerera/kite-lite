@@ -11,25 +11,14 @@ Usage:
 Env override: KITE_LITE_BIN (path to the kite-lite binary).
 """
 
-import json
-import os
-import subprocess
 import sys
 from itertools import combinations
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_BINARY = REPO_ROOT / "target" / "release" / (
-    "kite-lite.exe" if os.name == "nt" else "kite-lite"
-)
-BINARY = os.environ.get("KITE_LITE_BIN", str(DEFAULT_BINARY))
+from _kite_lite import FetchError, fetch_page
 
 
 def fetch_text(url):
-    proc = subprocess.run([BINARY, "fetch", url], capture_output=True, text=True, timeout=30)
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"exit code {proc.returncode}")
-    page = json.loads(proc.stdout)
+    page = fetch_page(url)
     return page.get("title"), page.get("text", "")
 
 
@@ -41,8 +30,8 @@ def shingles(text, size):
 
 
 def jaccard(a, b):
-    if not a and not b:
-        return 1.0
+    # Either side empty means no text to compare (e.g. a JS-rendered page
+    # kite-lite can't execute) -- not evidence the pages are identical.
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
@@ -70,11 +59,19 @@ def main():
     pages = {}
     for url in urls:
         print(f"fetching {url}", file=sys.stderr)
-        title, text = fetch_text(url)
+        try:
+            title, text = fetch_text(url)
+        except FetchError as error:
+            print(f"  [ERROR] {error}", file=sys.stderr)
+            continue
         pages[url] = {"title": title, "shingles": shingles(text, shingle_size)}
 
+    if len(pages) < 2:
+        print("no hay al menos 2 paginas obtenidas con exito para comparar", file=sys.stderr)
+        sys.exit(2)
+
     flagged = []
-    for url_a, url_b in combinations(urls, 2):
+    for url_a, url_b in combinations(pages, 2):
         score = jaccard(pages[url_a]["shingles"], pages[url_b]["shingles"])
         if score >= threshold:
             flagged.append((score, url_a, url_b))

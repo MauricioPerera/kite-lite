@@ -16,17 +16,12 @@ Env override: KITE_LITE_BIN (path to the kite-lite binary).
 """
 
 import json
-import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_BINARY = REPO_ROOT / "target" / "release" / (
-    "kite-lite.exe" if os.name == "nt" else "kite-lite"
-)
-BINARY = os.environ.get("KITE_LITE_BIN", str(DEFAULT_BINARY))
+from _kite_lite import fetch_page
+
 BLOCK_TAGS = {"p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "td", "th"}
 
 MONTHS_ES = (
@@ -44,10 +39,7 @@ CONTEXT_RADIUS = 40
 
 def load_page(target):
     if target.startswith("http://") or target.startswith("https://"):
-        proc = subprocess.run([BINARY, "fetch", target], capture_output=True, text=True, timeout=30)
-        if proc.returncode != 0:
-            raise RuntimeError(proc.stderr.strip() or f"exit code {proc.returncode}")
-        return json.loads(proc.stdout)
+        return fetch_page(target)
     return json.loads(Path(target).read_text(encoding="utf-8"))
 
 

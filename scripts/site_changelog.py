@@ -18,25 +18,13 @@ Env override: KITE_LITE_BIN (path to the kite-lite binary).
 
 import difflib
 import json
-import os
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_BINARY = REPO_ROOT / "target" / "release" / (
-    "kite-lite.exe" if os.name == "nt" else "kite-lite"
-)
-BINARY = os.environ.get("KITE_LITE_BIN", str(DEFAULT_BINARY))
+from _kite_lite import fetch_page
+
 BLOCK_TAGS = {"p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "td", "th"}
-
-
-def fetch_page(url):
-    proc = subprocess.run([BINARY, "fetch", url], capture_output=True, text=True, timeout=30)
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"exit code {proc.returncode}")
-    return json.loads(proc.stdout)
 
 
 def collect_block_texts(element, out):

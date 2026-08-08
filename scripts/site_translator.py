@@ -16,45 +16,18 @@ Env overrides:
 
 import json
 import os
-import subprocess
 import sys
 import urllib.request
 from pathlib import Path
 
+from _kite_lite import fetch_page, parse_json_response
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_BINARY = REPO_ROOT / "target" / "release" / (
-    "kite-lite.exe" if os.name == "nt" else "kite-lite"
-)
-BINARY = os.environ.get("KITE_LITE_BIN", str(DEFAULT_BINARY))
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
 MODEL = os.environ.get("OLLAMA_MODEL", "gpt-oss:20b-cloud")
 BLOCK_TAGS = {"p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "td", "th"}
-
-
-def parse_json_response(content):
-    """Ollama's `format: "json"` doesn't guarantee fence-free output for
-    every model — some (glm-5.2:cloud observed doing this) still wrap the
-    JSON in a ```json ... ``` markdown block. Strip that before parsing."""
-    stripped = content.strip()
-    if stripped.startswith("```"):
-        stripped = stripped.strip("`")
-        if stripped.lower().startswith("json"):
-            stripped = stripped[4:]
-        stripped = stripped.strip()
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError as error:
-        raise RuntimeError(f"respuesta del modelo no es JSON valido: {content[:300]!r}") from error
-
-
-def fetch_page(url):
-    proc = subprocess.run([BINARY, "fetch", url], capture_output=True, text=True, timeout=30)
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"exit code {proc.returncode}")
-    return json.loads(proc.stdout)
 
 
 def collect_block_texts(element, out):

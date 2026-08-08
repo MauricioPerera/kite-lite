@@ -17,27 +17,18 @@ Env override: KITE_LITE_BIN (path to the kite-lite binary).
 import concurrent.futures
 import hashlib
 import json
-import os
-import subprocess
 import sys
 import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_BINARY = REPO_ROOT / "target" / "release" / (
-    "kite-lite.exe" if os.name == "nt" else "kite-lite"
-)
-BINARY = os.environ.get("KITE_LITE_BIN", str(DEFAULT_BINARY))
+from _kite_lite import FetchError, fetch_page
 
 
 def fetch_one(url):
     try:
-        proc = subprocess.run([BINARY, "fetch", url], capture_output=True, text=True, timeout=30)
-    except subprocess.TimeoutExpired:
-        return url, None, "timeout"
-    if proc.returncode != 0:
-        return url, None, proc.stderr.strip() or f"exit code {proc.returncode}"
-    page = json.loads(proc.stdout)
+        page = fetch_page(url)
+    except FetchError as error:
+        return url, None, str(error)
     fingerprint_source = (page.get("title") or "") + "\n" + (page.get("text") or "")
     digest = hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()
     return url, {"title": page.get("title"), "hash": digest}, None

@@ -26,7 +26,10 @@ BINARY = os.environ.get("KITE_LITE_BIN", str(DEFAULT_BINARY))
 
 
 def fetch(url):
-    return subprocess.run([BINARY, "fetch", url], capture_output=True, text=True, timeout=20)
+    try:
+        return subprocess.run([BINARY, "fetch", url], capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args=[BINARY, "fetch", url], returncode=124, stdout="", stderr="timeout")
 
 
 def same_origin(a, b):

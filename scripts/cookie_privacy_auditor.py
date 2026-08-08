@@ -17,31 +17,31 @@ Usage:
 Env override: KITE_LITE_BIN (path to the kite-lite binary).
 """
 
-import json
-import os
 import re
-import subprocess
 import sys
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_BINARY = REPO_ROOT / "target" / "release" / (
-    "kite-lite.exe" if os.name == "nt" else "kite-lite"
-)
-BINARY = os.environ.get("KITE_LITE_BIN", str(DEFAULT_BINARY))
+from _kite_lite import fetch_page
 
+# Known tracker-cookie prefixes, plus generic keyword matches. The keyword
+# matches alone would also catch opt-out/consent cookies that happen to
+# contain "track"/"analytics" in their name (e.g. "analytics_consent",
+# "ad_blocked") -- OPT_OUT_NAME_RE below excludes those.
 TRACKING_NAME_RE = re.compile(
     r"^(_ga|_gid|_gcl|_fbp|_fbc|_gat|_uetsid|_uetvid|_pin_unauth)|track|analytics|ads?_id",
     re.IGNORECASE,
 )
-CONSENT_TEXT_RE = re.compile(r"cookie|consent|consentimiento|privacidad|privacy", re.IGNORECASE)
+OPT_OUT_NAME_RE = re.compile(r"consent|opt.?out|block", re.IGNORECASE)
 
-
-def fetch_page(url):
-    proc = subprocess.run([BINARY, "fetch", url], capture_output=True, text=True, timeout=30)
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"exit code {proc.returncode}")
-    return json.loads(proc.stdout)
+# A page merely containing the word "privacy"/"privacidad" anywhere (e.g. a
+# footer link to a privacy policy) is not evidence of an actual cookie
+# consent mechanism -- require the word "cookie(s)" AND a consent-related
+# action/policy word to both appear before treating the page as having
+# disclosed anything about cookies.
+COOKIE_MENTION_RE = re.compile(r"\bcookies?\b", re.IGNORECASE)
+CONSENT_SIGNAL_RE = re.compile(
+    r"consent(imiento)?|acepta|rechaza|gestiona|preferencias|banner|policy|pol[ií]tica",
+    re.IGNORECASE,
+)
 
 
 def main():
@@ -52,7 +52,8 @@ def main():
 
     page = fetch_page(url)
     cookies = page.get("cookies", [])
-    has_consent_text = bool(CONSENT_TEXT_RE.search(page.get("text", "")))
+    text = page.get("text", "")
+    has_consent_text = bool(COOKIE_MENTION_RE.search(text) and CONSENT_SIGNAL_RE.search(text))
 
     print(f"URL: {page.get('url') or url}")
     print(f"Titulo: {page.get('title')}")
@@ -64,7 +65,7 @@ def main():
 
     tracking_count = 0
     for cookie in cookies:
-        is_tracking = bool(TRACKING_NAME_RE.search(cookie["name"]))
+        is_tracking = bool(TRACKING_NAME_RE.search(cookie["name"])) and not OPT_OUT_NAME_RE.search(cookie["name"])
         tracking_count += is_tracking
         flags = []
         if cookie.get("secure"):

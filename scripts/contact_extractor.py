@@ -15,18 +15,11 @@ Env override: KITE_LITE_BIN (path to the kite-lite binary).
 """
 
 import json
-import os
 import re
-import subprocess
 import sys
 import urllib.parse
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_BINARY = REPO_ROOT / "target" / "release" / (
-    "kite-lite.exe" if os.name == "nt" else "kite-lite"
-)
-BINARY = os.environ.get("KITE_LITE_BIN", str(DEFAULT_BINARY))
+from _kite_lite import FetchError, fetch_page
 
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 PHONE_RE = re.compile(r"(?:\+\d{1,3}[\s.-]?)?\(?\d{2,4}\)?[\s.-]?\d{3,4}[\s.-]?\d{3,4}(?:[\s.-]?\d{2,4})?")
@@ -40,13 +33,6 @@ SOCIAL_DOMAINS = {
     "youtube.com": "youtube",
     "tiktok.com": "tiktok",
 }
-
-
-def fetch_page(url):
-    proc = subprocess.run([BINARY, "fetch", url], capture_output=True, text=True, timeout=30)
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"exit code {proc.returncode}")
-    return json.loads(proc.stdout)
 
 
 def walk_links(element, emails, phones):
@@ -89,7 +75,11 @@ def main():
     emails, phones, social = set(), set(), {}
     for url in urls:
         print(f"fetching {url}", file=sys.stderr)
-        page = fetch_page(url)
+        try:
+            page = fetch_page(url)
+        except FetchError as error:
+            print(f"  [ERROR] {error}", file=sys.stderr)
+            continue
         walk_links(page["root"], emails, phones)
         extract_social(page.get("links", []), social)
         extract_from_text(page.get("text", ""), emails, phones)

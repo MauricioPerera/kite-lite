@@ -27,25 +27,17 @@ Env override: KITE_LITE_BIN (path to the kite-lite binary).
 """
 
 import json
-import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_BINARY = REPO_ROOT / "target" / "release" / (
-    "kite-lite.exe" if os.name == "nt" else "kite-lite"
-)
-BINARY = os.environ.get("KITE_LITE_BIN", str(DEFAULT_BINARY))
+from _kite_lite import fetch_page
+
 DEFAULT_PATTERN = r"\$\s?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})?)"
 
 
 def fetch_text(url):
-    proc = subprocess.run([BINARY, "fetch", url], capture_output=True, text=True, timeout=30)
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"exit code {proc.returncode}")
-    return json.loads(proc.stdout).get("text", "")
+    return fetch_page(url).get("text", "")
 
 
 def extract_price(text, pattern):

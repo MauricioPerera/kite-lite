@@ -25,32 +25,12 @@ root-owned file at a shared path.
 """
 
 import binascii
-import os
 import struct
-import subprocess
 import sys
-import tempfile
 import zlib
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_BINARY = REPO_ROOT / "target" / "release" / (
-    "kite-lite.exe" if os.name == "nt" else "kite-lite"
-)
-BINARY = os.environ.get("KITE_LITE_BIN", str(DEFAULT_BINARY))
-
-
-def render_png(url):
-    fd, path = tempfile.mkstemp(suffix=".png")
-    os.close(fd)
-    os.chmod(path, 0o666)
-    try:
-        proc = subprocess.run([BINARY, url, "--png", path], capture_output=True, text=True, timeout=30)
-        if proc.returncode != 0:
-            raise RuntimeError(proc.stderr.strip() or f"exit code {proc.returncode}")
-        return Path(path).read_bytes()
-    finally:
-        os.unlink(path)
+from _kite_lite import render_png
 
 
 def paeth(a, b, c):
