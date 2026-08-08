@@ -187,14 +187,15 @@ pub struct EvalResponse {
 
 pub use a11y::{lint as lint_a11y, A11yFinding, Severity as A11ySeverity};
 pub use js::{JsRuntime, JsValueResult};
-pub use social::{lint as lint_social, Severity as SocialSeverity, SocialFinding, SocialPreview};
-pub use seo::{lint as lint_seo, SeoFinding, Severity as SeoSeverity};
 pub use layout::compute_layout;
 pub use raster::{render_pdf, render_png};
 pub use render::render_svg;
+pub use seo::{lint as lint_seo, SeoFinding, Severity as SeoSeverity};
+pub use social::{lint as lint_social, Severity as SocialSeverity, SocialFinding, SocialPreview};
 pub use webmcp::{
     build_submission as build_webmcp_submission, discover_tools as discover_webmcp_tools,
-    lint as lint_webmcp, LintFinding as WebMcpLintFinding, Severity as WebMcpLintSeverity, WebMcpTool,
+    lint as lint_webmcp, LintFinding as WebMcpLintFinding, Severity as WebMcpLintSeverity,
+    WebMcpTool,
 };
 
 /// Rewrites every relative link (`page.links` and each `Element.href`) into
@@ -266,7 +267,11 @@ struct ParsedAttrs {
 
 fn element_from_handle(handle: &Handle) -> Element {
     let attrs = match &handle.data {
-        NodeData::Element { name: tag_name, attrs, .. } => {
+        NodeData::Element {
+            name: tag_name,
+            attrs,
+            ..
+        } => {
             let attrs = attrs.borrow();
             let tag = tag_name.local.to_string();
             let href_attr_name = if tag == "form" { "action" } else { "href" };
@@ -277,7 +282,9 @@ fn element_from_handle(handle: &Handle) -> Element {
                     .map(|attr| attr.value.to_string())
             };
             let has_attr = |attr_name: &str| -> bool {
-                attrs.iter().any(|attr| attr.name.local.as_ref() == attr_name)
+                attrs
+                    .iter()
+                    .any(|attr| attr.name.local.as_ref() == attr_name)
             };
             ParsedAttrs {
                 tag,
@@ -295,8 +302,14 @@ fn element_from_handle(handle: &Handle) -> Element {
                 lang: attr("lang"),
             }
         }
-        NodeData::Document => ParsedAttrs { tag: "document".to_string(), ..Default::default() },
-        _ => ParsedAttrs { tag: "text".to_string(), ..Default::default() },
+        NodeData::Document => ParsedAttrs {
+            tag: "document".to_string(),
+            ..Default::default()
+        },
+        _ => ParsedAttrs {
+            tag: "text".to_string(),
+            ..Default::default()
+        },
     };
 
     if matches!(attrs.tag.as_str(), "head" | "script" | "style") {
@@ -490,7 +503,10 @@ mod tests {
         if element.tag == tag {
             return Some(element);
         }
-        element.children.iter().find_map(|child| find_by_tag(child, tag))
+        element
+            .children
+            .iter()
+            .find_map(|child| find_by_tag(child, tag))
     }
 
     #[test]

@@ -127,25 +127,46 @@ fn render_writes_png_and_pdf_files_by_output_extension() {
     let png_path = temp_file("render-page.png");
     let _png_guard = TempPath(png_path.clone());
     let output = Command::new(bin_path())
-        .args(["render", page.0.to_str().unwrap(), "--output", png_path.to_str().unwrap()])
+        .args([
+            "render",
+            page.0.to_str().unwrap(),
+            "--output",
+            png_path.to_str().unwrap(),
+        ])
         .output()
         .expect("failed to run kite-lite render (png)");
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let png_bytes = std::fs::read(&png_path).expect("png output missing");
     assert_eq!(&png_bytes[..8], b"\x89PNG\r\n\x1a\n");
 
     let pdf_path = temp_file("render-page.pdf");
     let _pdf_guard = TempPath(pdf_path.clone());
     let output = Command::new(bin_path())
-        .args(["render", page.0.to_str().unwrap(), "--output", pdf_path.to_str().unwrap()])
+        .args([
+            "render",
+            page.0.to_str().unwrap(),
+            "--output",
+            pdf_path.to_str().unwrap(),
+        ])
         .output()
         .expect("failed to run kite-lite render (pdf)");
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let pdf_bytes = std::fs::read(&pdf_path).expect("pdf output missing");
     assert_eq!(&pdf_bytes[..5], b"%PDF-");
 }
 
-fn find_element_by_tag<'a>(element: &'a serde_json::Value, tag: &str) -> Option<&'a serde_json::Value> {
+fn find_element_by_tag<'a>(
+    element: &'a serde_json::Value,
+    tag: &str,
+) -> Option<&'a serde_json::Value> {
     if element["tag"] == tag {
         return Some(element);
     }
@@ -284,8 +305,8 @@ fn cdp_runtime_evaluate_uses_isolated_child_process() {
     let _guard = ChildGuard(child);
     wait_for_port(port);
 
-    let (mut socket, _) =
-        tungstenite::connect(format!("ws://127.0.0.1:{port}/")).expect("failed to connect CDP websocket");
+    let (mut socket, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}/"))
+        .expect("failed to connect CDP websocket");
 
     socket
         .send(tungstenite::Message::Text(
@@ -412,10 +433,9 @@ fn fetch_follows_redirect_and_resolves_final_url() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let page: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(&output_path).expect("missing fetch output"),
-    )
-    .expect("invalid page JSON");
+    let page: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&output_path).expect("missing fetch output"))
+            .expect("invalid page JSON");
 
     // The cookie set on /start's redirect must have been carried onto the
     // /final request within this single fetch's redirect chain.
@@ -575,7 +595,11 @@ fn spawn_interaction_server(port: u16) {
                 "/with-cookie" => "<title>Has cookies</title>".to_string(),
                 _ => String::new(),
             };
-            let status = if body.is_empty() { "404 Not Found" } else { "200 OK" };
+            let status = if body.is_empty() {
+                "404 Not Found"
+            } else {
+                "200 OK"
+            };
             let extra_headers = if route == "/with-cookie" {
                 "Set-Cookie: session=abc123; Path=/; HttpOnly; Secure; SameSite=Lax\r\n\
                  Set-Cookie: tracking=xyz789\r\n"
@@ -616,15 +640,28 @@ fn click_navigates_and_form_submit_sends_field_values() {
         "Page.navigate",
         serde_json::json!({"url": format!("http://127.0.0.1:{mock_port}/")}),
     );
-    assert!(nav["result"].get("frameId").is_some(), "navigate failed: {nav:?}");
+    assert!(
+        nav["result"].get("frameId").is_some(),
+        "navigate failed: {nav:?}"
+    );
     drain_events(&mut socket, 3);
 
     // Click the <a href="/target"> by first asking where it is (DOM.getBoxModel,
     // the same way a real CDP client like Playwright would), then dispatching
     // a mouse event at a point inside its box.
-    let select_link = send_cdp(&mut socket, 2, "DOM.querySelector", serde_json::json!({"selector": "a"}));
+    let select_link = send_cdp(
+        &mut socket,
+        2,
+        "DOM.querySelector",
+        serde_json::json!({"selector": "a"}),
+    );
     let link_id = select_link["result"]["nodeId"].as_u64().unwrap();
-    let box_model = send_cdp(&mut socket, 3, "DOM.getBoxModel", serde_json::json!({"nodeId": link_id}));
+    let box_model = send_cdp(
+        &mut socket,
+        3,
+        "DOM.getBoxModel",
+        serde_json::json!({"nodeId": link_id}),
+    );
     let content = box_model["result"]["model"]["content"].as_array().unwrap();
     let link_y = content[1].as_f64().unwrap() + 0.5;
 
@@ -657,12 +694,25 @@ fn click_navigates_and_form_submit_sends_field_values() {
         "Page.navigate",
         serde_json::json!({"url": format!("http://127.0.0.1:{mock_port}/")}),
     );
-    assert!(nav_back["result"].get("frameId").is_some(), "nav back failed: {nav_back:?}");
+    assert!(
+        nav_back["result"].get("frameId").is_some(),
+        "nav back failed: {nav_back:?}"
+    );
     drain_events(&mut socket, 3);
 
-    let select_input = send_cdp(&mut socket, 7, "DOM.querySelector", serde_json::json!({"selector": "input"}));
+    let select_input = send_cdp(
+        &mut socket,
+        7,
+        "DOM.querySelector",
+        serde_json::json!({"selector": "input"}),
+    );
     let input_id = select_input["result"]["nodeId"].as_u64().unwrap();
-    let input_box = send_cdp(&mut socket, 8, "DOM.getBoxModel", serde_json::json!({"nodeId": input_id}));
+    let input_box = send_cdp(
+        &mut socket,
+        8,
+        "DOM.getBoxModel",
+        serde_json::json!({"nodeId": input_id}),
+    );
     let input_content = input_box["result"]["model"]["content"].as_array().unwrap();
     let input_y = input_content[1].as_f64().unwrap() + 0.5;
 
@@ -679,9 +729,19 @@ fn click_navigates_and_form_submit_sends_field_values() {
         serde_json::json!({"type": "char", "text": "rust"}),
     );
 
-    let select_button = send_cdp(&mut socket, 11, "DOM.querySelector", serde_json::json!({"selector": "button"}));
+    let select_button = send_cdp(
+        &mut socket,
+        11,
+        "DOM.querySelector",
+        serde_json::json!({"selector": "button"}),
+    );
     let button_id = select_button["result"]["nodeId"].as_u64().unwrap();
-    let button_box = send_cdp(&mut socket, 12, "DOM.getBoxModel", serde_json::json!({"nodeId": button_id}));
+    let button_box = send_cdp(
+        &mut socket,
+        12,
+        "DOM.getBoxModel",
+        serde_json::json!({"nodeId": button_id}),
+    );
     let button_content = button_box["result"]["model"]["content"].as_array().unwrap();
     let button_y = button_content[1].as_f64().unwrap() + 0.5;
 
@@ -703,7 +763,10 @@ fn click_navigates_and_form_submit_sends_field_values() {
         "Runtime.evaluate",
         serde_json::json!({"expression": "document.title"}),
     );
-    assert_eq!(title_after_submit["result"]["result"]["value"], "Results: rust");
+    assert_eq!(
+        title_after_submit["result"]["result"]["value"],
+        "Results: rust"
+    );
 }
 
 #[test]
@@ -804,7 +867,11 @@ impl McpClient {
             .expect("failed to start kite-lite mcp");
         let stdin = child.stdin.take().expect("missing mcp stdin");
         let stdout = BufReader::new(child.stdout.take().expect("missing mcp stdout"));
-        let mut client = Self { child, stdin, stdout };
+        let mut client = Self {
+            child,
+            stdin,
+            stdout,
+        };
         let init = client.send(
             0,
             "initialize",
@@ -822,7 +889,8 @@ impl McpClient {
     }
 
     fn send(&mut self, id: u64, method: &str, params: serde_json::Value) -> serde_json::Value {
-        let request = serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        let request =
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         writeln!(self.stdin, "{request}").expect("failed to write mcp request");
         self.stdin.flush().expect("failed to flush mcp stdin");
         let mut line = String::new();
@@ -830,13 +898,21 @@ impl McpClient {
             .read_line(&mut line)
             .expect("failed to read mcp response");
         assert!(!line.is_empty(), "mcp server closed stdout unexpectedly");
-        serde_json::from_str(&line).unwrap_or_else(|error| {
-            panic!("invalid mcp response JSON: {error}\nline: {line}")
-        })
+        serde_json::from_str(&line)
+            .unwrap_or_else(|error| panic!("invalid mcp response JSON: {error}\nline: {line}"))
     }
 
-    fn call_tool(&mut self, id: u64, name: &str, arguments: serde_json::Value) -> serde_json::Value {
-        self.send(id, "tools/call", serde_json::json!({"name": name, "arguments": arguments}))
+    fn call_tool(
+        &mut self,
+        id: u64,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        self.send(
+            id,
+            "tools/call",
+            serde_json::json!({"name": name, "arguments": arguments}),
+        )
     }
 }
 
@@ -851,10 +927,28 @@ impl Drop for McpClient {
 fn mcp_initialize_and_list_tools() {
     let mut mcp = McpClient::start();
     let list = mcp.send(1, "tools/list", serde_json::json!({}));
-    let tools = list["result"]["tools"].as_array().expect("tools/list missing tools array");
-    let names: Vec<&str> = tools.iter().filter_map(|tool| tool["name"].as_str()).collect();
-    for expected in ["fetch_page", "render_screenshot", "eval_js", "browser_navigate", "browser_click", "browser_type", "browser_get_dom", "browser_screenshot", "browser_call_tool"] {
-        assert!(names.contains(&expected), "missing tool '{expected}' in {names:?}");
+    let tools = list["result"]["tools"]
+        .as_array()
+        .expect("tools/list missing tools array");
+    let names: Vec<&str> = tools
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    for expected in [
+        "fetch_page",
+        "render_screenshot",
+        "eval_js",
+        "browser_navigate",
+        "browser_click",
+        "browser_type",
+        "browser_get_dom",
+        "browser_screenshot",
+        "browser_call_tool",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "missing tool '{expected}' in {names:?}"
+        );
     }
 }
 
@@ -865,12 +959,22 @@ fn mcp_fetch_page_returns_a_lightweight_summary() {
     wait_for_port(port);
 
     let mut mcp = McpClient::start();
-    let response = mcp.call_tool(2, "fetch_page", serde_json::json!({"url": format!("http://127.0.0.1:{port}/")}));
+    let response = mcp.call_tool(
+        2,
+        "fetch_page",
+        serde_json::json!({"url": format!("http://127.0.0.1:{port}/")}),
+    );
     assert_eq!(response["result"]["isError"], false, "{response:?}");
-    let text = response["result"]["content"][0]["text"].as_str().expect("missing text content");
-    let summary: serde_json::Value = serde_json::from_str(text).expect("fetch_page text is not JSON");
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("missing text content");
+    let summary: serde_json::Value =
+        serde_json::from_str(text).expect("fetch_page text is not JSON");
     assert_eq!(summary["title"], "Home");
-    assert!(summary.get("root").is_none(), "summary should not include the full DOM tree");
+    assert!(
+        summary.get("root").is_none(),
+        "summary should not include the full DOM tree"
+    );
 }
 
 #[test]
@@ -880,7 +984,11 @@ fn mcp_render_screenshot_returns_base64_png_image_content() {
     wait_for_port(port);
 
     let mut mcp = McpClient::start();
-    let response = mcp.call_tool(2, "render_screenshot", serde_json::json!({"url": format!("http://127.0.0.1:{port}/")}));
+    let response = mcp.call_tool(
+        2,
+        "render_screenshot",
+        serde_json::json!({"url": format!("http://127.0.0.1:{port}/")}),
+    );
     let content = &response["result"]["content"][0];
     assert_eq!(content["type"], "image");
     assert_eq!(content["mimeType"], "image/png");
@@ -916,7 +1024,11 @@ fn mcp_browser_session_navigates_clicks_and_submits_a_form() {
 
     let mut mcp = McpClient::start();
 
-    let nav = mcp.call_tool(2, "browser_navigate", serde_json::json!({"url": format!("http://127.0.0.1:{port}/")}));
+    let nav = mcp.call_tool(
+        2,
+        "browser_navigate",
+        serde_json::json!({"url": format!("http://127.0.0.1:{port}/")}),
+    );
     assert_eq!(nav["result"]["isError"], false, "{nav:?}");
 
     let click = mcp.call_tool(3, "browser_click", serde_json::json!({"selector": "a"}));
@@ -929,11 +1041,23 @@ fn mcp_browser_session_navigates_clicks_and_submits_a_form() {
     // Back to the form page: focus the input by selector while typing, then
     // click submit and confirm the field's value made it into the query
     // string the mock server received.
-    mcp.call_tool(4, "browser_navigate", serde_json::json!({"url": format!("http://127.0.0.1:{port}/")}));
-    let typed = mcp.call_tool(5, "browser_type", serde_json::json!({"selector": "input", "text": "rust"}));
+    mcp.call_tool(
+        4,
+        "browser_navigate",
+        serde_json::json!({"url": format!("http://127.0.0.1:{port}/")}),
+    );
+    let typed = mcp.call_tool(
+        5,
+        "browser_type",
+        serde_json::json!({"selector": "input", "text": "rust"}),
+    );
     assert_eq!(typed["result"]["isError"], false, "{typed:?}");
 
-    let submit = mcp.call_tool(6, "browser_click", serde_json::json!({"selector": "button"}));
+    let submit = mcp.call_tool(
+        6,
+        "browser_click",
+        serde_json::json!({"selector": "button"}),
+    );
     assert_eq!(submit["result"]["isError"], false, "{submit:?}");
     let submit_summary: serde_json::Value =
         serde_json::from_str(submit["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -947,7 +1071,11 @@ fn mcp_browser_get_dom_and_unknown_selector_error() {
     wait_for_port(port);
 
     let mut mcp = McpClient::start();
-    mcp.call_tool(2, "browser_navigate", serde_json::json!({"url": format!("http://127.0.0.1:{port}/")}));
+    mcp.call_tool(
+        2,
+        "browser_navigate",
+        serde_json::json!({"url": format!("http://127.0.0.1:{port}/")}),
+    );
 
     let dom = mcp.call_tool(3, "browser_get_dom", serde_json::json!({"selector": "a"}));
     assert_eq!(dom["result"]["isError"], false, "{dom:?}");
@@ -968,16 +1096,25 @@ fn mcp_discovers_and_calls_a_declarative_webmcp_tool() {
 
     let mut mcp = McpClient::start();
 
-    let nav = mcp.call_tool(2, "browser_navigate", serde_json::json!({"url": format!("http://127.0.0.1:{port}/webmcp")}));
+    let nav = mcp.call_tool(
+        2,
+        "browser_navigate",
+        serde_json::json!({"url": format!("http://127.0.0.1:{port}/webmcp")}),
+    );
     assert_eq!(nav["result"]["isError"], false, "{nav:?}");
     let nav_summary: serde_json::Value =
         serde_json::from_str(nav["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    let tools = nav_summary["tools"].as_array().expect("missing discovered tools");
+    let tools = nav_summary["tools"]
+        .as_array()
+        .expect("missing discovered tools");
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0]["name"], "search-cars");
     assert_eq!(tools[0]["description"], "Search for a car");
     assert_eq!(tools[0]["autosubmit"], false);
-    assert_eq!(tools[0]["inputSchema"]["required"], serde_json::json!(["make"]));
+    assert_eq!(
+        tools[0]["inputSchema"]["required"],
+        serde_json::json!(["make"])
+    );
     assert_eq!(
         tools[0]["inputSchema"]["properties"]["make"]["description"],
         "The vehicle's make"
@@ -993,7 +1130,11 @@ fn mcp_discovers_and_calls_a_declarative_webmcp_tool() {
         serde_json::from_str(call["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(call_summary["title"], "Results: BMW 330i");
 
-    let missing = mcp.call_tool(4, "browser_call_tool", serde_json::json!({"name": "no-such-tool"}));
+    let missing = mcp.call_tool(
+        4,
+        "browser_call_tool",
+        serde_json::json!({"name": "no-such-tool"}),
+    );
     assert_eq!(missing["result"]["isError"], true, "{missing:?}");
 }
 
@@ -1036,7 +1177,11 @@ fn webmcp_lint_exits_zero_for_a_well_formed_local_file() {
         .output()
         .expect("failed to run kite-lite webmcp-lint");
 
-    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("Sin hallazgos"));
 }
 
@@ -1072,7 +1217,11 @@ fn webmcp_lint_works_against_a_live_url() {
         .output()
         .expect("failed to run kite-lite webmcp-lint");
 
-    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("model"), "{stdout}");
     assert!(stdout.contains("toolparamdescription"), "{stdout}");
@@ -1094,7 +1243,11 @@ fn a11y_lint_reports_warnings_for_a_broken_local_file() {
         .output()
         .expect("failed to run kite-lite a11y-lint");
 
-    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("sin atributo 'alt'"), "{stdout}");
     assert!(stdout.contains("sin atributo 'lang'"), "{stdout}");
@@ -1119,13 +1272,20 @@ fn a11y_lint_exits_zero_for_a_well_formed_local_file() {
         .output()
         .expect("failed to run kite-lite a11y-lint");
 
-    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("Sin hallazgos"));
 }
 
 #[test]
 fn a11y_lint_json_output_is_parseable() {
-    let html = write_html("a11y-json.html", r#"<html><body><img src="x.png"></body></html>"#);
+    let html = write_html(
+        "a11y-json.html",
+        r#"<html><body><img src="x.png"></body></html>"#,
+    );
 
     let output = Command::new(bin_path())
         .args(["a11y-lint", html.0.to_str().unwrap(), "--json"])
@@ -1151,7 +1311,11 @@ fn a11y_lint_works_against_a_live_url() {
         .output()
         .expect("failed to run kite-lite a11y-lint");
 
-    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("lang"));
 }
 
@@ -1167,7 +1331,11 @@ fn social_lint_falls_back_to_title_and_text_without_og_tags() {
         .output()
         .expect("failed to run kite-lite social-lint");
 
-    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Pagina sin OG"), "{stdout}");
     assert!(stdout.contains("contenido de la pagina"), "{stdout}");
@@ -1190,7 +1358,11 @@ fn social_lint_exits_zero_for_a_well_formed_local_file() {
         .output()
         .expect("failed to run kite-lite social-lint");
 
-    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("Sin hallazgos"));
 }
 
@@ -1224,8 +1396,13 @@ fn social_lint_json_output_is_parseable() {
         serde_json::from_slice(&output.stdout).expect("--json output is not valid JSON");
     assert_eq!(parsed["preview"]["title"], "T");
     assert_eq!(parsed["preview"]["image"], "/rel.png");
-    let findings = parsed["findings"].as_array().expect("expected a findings array");
-    assert!(findings.iter().any(|f| f["message"].as_str().unwrap().contains("no es una URL absoluta")));
+    let findings = parsed["findings"]
+        .as_array()
+        .expect("expected a findings array");
+    assert!(findings.iter().any(|f| f["message"]
+        .as_str()
+        .unwrap()
+        .contains("no es una URL absoluta")));
 }
 
 #[test]
@@ -1239,7 +1416,11 @@ fn social_lint_works_against_a_live_url() {
         .output()
         .expect("failed to run kite-lite social-lint");
 
-    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("Home"));
 }
 
@@ -1281,7 +1462,11 @@ fn seo_lint_exits_zero_for_a_well_formed_local_file() {
         .output()
         .expect("failed to run kite-lite seo-lint");
 
-    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("Sin hallazgos"));
 }
 
@@ -1312,7 +1497,11 @@ fn seo_lint_works_against_a_live_url() {
         .output()
         .expect("failed to run kite-lite seo-lint");
 
-    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("muy corto"));
 }
 
@@ -1323,11 +1512,17 @@ fn mcp_fetch_page_reports_set_cookie_headers() {
     wait_for_port(port);
 
     let mut mcp = McpClient::start();
-    let response = mcp.call_tool(2, "fetch_page", serde_json::json!({"url": format!("http://127.0.0.1:{port}/with-cookie")}));
+    let response = mcp.call_tool(
+        2,
+        "fetch_page",
+        serde_json::json!({"url": format!("http://127.0.0.1:{port}/with-cookie")}),
+    );
     assert_eq!(response["result"]["isError"], false, "{response:?}");
     let summary: serde_json::Value =
         serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    let cookies = summary["cookies"].as_array().expect("missing cookies array");
+    let cookies = summary["cookies"]
+        .as_array()
+        .expect("missing cookies array");
     assert_eq!(cookies.len(), 2);
     assert_eq!(cookies[0]["name"], "session");
     assert_eq!(cookies[0]["value"], "abc123");
@@ -1343,11 +1538,17 @@ fn mcp_browser_navigate_reports_set_cookie_headers() {
     wait_for_port(port);
 
     let mut mcp = McpClient::start();
-    let nav = mcp.call_tool(2, "browser_navigate", serde_json::json!({"url": format!("http://127.0.0.1:{port}/with-cookie")}));
+    let nav = mcp.call_tool(
+        2,
+        "browser_navigate",
+        serde_json::json!({"url": format!("http://127.0.0.1:{port}/with-cookie")}),
+    );
     assert_eq!(nav["result"]["isError"], false, "{nav:?}");
     let summary: serde_json::Value =
         serde_json::from_str(nav["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    let cookies = summary["cookies"].as_array().expect("missing cookies array");
+    let cookies = summary["cookies"]
+        .as_array()
+        .expect("missing cookies array");
     assert_eq!(cookies.len(), 2);
     assert_eq!(cookies[0]["name"], "session");
     assert_eq!(cookies[0]["domain"], serde_json::Value::Null);

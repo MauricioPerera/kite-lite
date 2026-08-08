@@ -53,7 +53,11 @@ fn build_tool(form: &Element, name: &str) -> WebMcpTool {
     }
 }
 
-fn collect_field_schemas(element: &Element, properties: &mut Map<String, Value>, required: &mut Vec<String>) {
+fn collect_field_schemas(
+    element: &Element,
+    properties: &mut Map<String, Value>,
+    required: &mut Vec<String>,
+) {
     if let Some(field_name) = field_name(element) {
         let mut schema = field_type_schema(element);
         if let Some(description) = &element.tool_param_description {
@@ -100,9 +104,17 @@ fn option_values(select: &Element) -> impl Iterator<Item = String> + '_ {
 /// field's current DOM value when an argument is missing). Mirrors the same
 /// GET-only limitation as CDP's click-driven form submit: there's no request
 /// body, so a form's real `method="post"` is not honored.
-pub fn build_submission(page: &Page, tool_name: &str, arguments: &Value) -> Option<(String, String)> {
+pub fn build_submission(
+    page: &Page,
+    tool_name: &str,
+    arguments: &Value,
+) -> Option<(String, String)> {
     let form = find_form(&page.root, tool_name)?;
-    let action_url = form.href.clone().or_else(|| page.url.clone()).unwrap_or_default();
+    let action_url = form
+        .href
+        .clone()
+        .or_else(|| page.url.clone())
+        .unwrap_or_default();
     let mut fields = Vec::new();
     collect_arg_fields(form, arguments, &mut fields);
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
@@ -116,7 +128,10 @@ fn find_form<'a>(element: &'a Element, tool_name: &str) -> Option<&'a Element> {
     if element.tag == "form" && element.tool_name.as_deref() == Some(tool_name) {
         return Some(element);
     }
-    element.children.iter().find_map(|child| find_form(child, tool_name))
+    element
+        .children
+        .iter()
+        .find_map(|child| find_form(child, tool_name))
 }
 
 fn collect_arg_fields(element: &Element, arguments: &Value, fields: &mut Vec<(String, String)>) {
@@ -196,14 +211,26 @@ fn collect_tool_forms<'a>(element: &'a Element, forms: &mut Vec<&'a Element>) {
     }
 }
 
-fn add_finding(findings: &mut Vec<LintFinding>, severity: Severity, tool: &str, message: impl Into<String>) {
-    findings.push(LintFinding { severity, tool: tool.to_string(), message: message.into() });
+fn add_finding(
+    findings: &mut Vec<LintFinding>,
+    severity: Severity,
+    tool: &str,
+    message: impl Into<String>,
+) {
+    findings.push(LintFinding {
+        severity,
+        tool: tool.to_string(),
+        message: message.into(),
+    });
 }
 
 fn lint_form(form: &Element, name: &str, occurrences: u32, findings: &mut Vec<LintFinding>) {
     if name.trim().is_empty() {
         add_finding(findings, Severity::Error, name, "toolname esta vacio");
-    } else if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    } else if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         add_finding(
             findings,
             Severity::Warning,
@@ -221,7 +248,13 @@ fn lint_form(form: &Element, name: &str, occurrences: u32, findings: &mut Vec<Li
         );
     }
 
-    if form.tool_description.as_deref().unwrap_or_default().trim().is_empty() {
+    if form
+        .tool_description
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
         add_finding(
             findings,
             Severity::Error,
@@ -239,7 +272,11 @@ fn lint_form(form: &Element, name: &str, occurrences: u32, findings: &mut Vec<Li
         );
     }
 
-    if form.method.as_deref().is_some_and(|m| m.eq_ignore_ascii_case("post")) {
+    if form
+        .method
+        .as_deref()
+        .is_some_and(|m| m.eq_ignore_ascii_case("post"))
+    {
         add_finding(
             findings,
             Severity::Info,
@@ -444,7 +481,9 @@ mod tests {
         assert!(messages(&findings, Severity::Info)
             .iter()
             .any(|m| m.contains("method=\"post\"")));
-        assert!(findings.iter().all(|f| f.severity != Severity::Error || !f.message.contains("post")));
+        assert!(findings
+            .iter()
+            .all(|f| f.severity != Severity::Error || !f.message.contains("post")));
     }
 
     #[test]
@@ -460,7 +499,8 @@ mod tests {
 
     #[test]
     fn toolname_with_spaces_is_a_warning() {
-        let page = parse_html(r#"<form toolname="go now" tooldescription="Go" action="/x"></form>"#);
+        let page =
+            parse_html(r#"<form toolname="go now" tooldescription="Go" action="/x"></form>"#);
         let findings = lint(&page);
         assert!(messages(&findings, Severity::Warning)
             .iter()

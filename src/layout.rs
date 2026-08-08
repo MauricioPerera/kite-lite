@@ -16,16 +16,56 @@ pub(crate) struct TagStyle {
 /// both sides.
 pub(crate) fn tag_style(tag: &str) -> TagStyle {
     match tag {
-        "h1" => TagStyle { font_size: 32.0, margin: 24.0, bold: true },
-        "h2" => TagStyle { font_size: 24.0, margin: 20.0, bold: true },
-        "h3" => TagStyle { font_size: 19.0, margin: 18.0, bold: true },
-        "h4" => TagStyle { font_size: 16.0, margin: 16.0, bold: true },
-        "h5" => TagStyle { font_size: 13.0, margin: 14.0, bold: true },
-        "h6" => TagStyle { font_size: 11.0, margin: 14.0, bold: true },
-        "p" | "blockquote" | "ul" | "ol" => TagStyle { font_size: 16.0, margin: 16.0, bold: false },
-        "li" => TagStyle { font_size: 16.0, margin: 4.0, bold: false },
-        "strong" | "b" => TagStyle { font_size: 16.0, margin: 0.0, bold: true },
-        _ => TagStyle { font_size: 16.0, margin: 0.0, bold: false },
+        "h1" => TagStyle {
+            font_size: 32.0,
+            margin: 24.0,
+            bold: true,
+        },
+        "h2" => TagStyle {
+            font_size: 24.0,
+            margin: 20.0,
+            bold: true,
+        },
+        "h3" => TagStyle {
+            font_size: 19.0,
+            margin: 18.0,
+            bold: true,
+        },
+        "h4" => TagStyle {
+            font_size: 16.0,
+            margin: 16.0,
+            bold: true,
+        },
+        "h5" => TagStyle {
+            font_size: 13.0,
+            margin: 14.0,
+            bold: true,
+        },
+        "h6" => TagStyle {
+            font_size: 11.0,
+            margin: 14.0,
+            bold: true,
+        },
+        "p" | "blockquote" | "ul" | "ol" => TagStyle {
+            font_size: 16.0,
+            margin: 16.0,
+            bold: false,
+        },
+        "li" => TagStyle {
+            font_size: 16.0,
+            margin: 4.0,
+            bold: false,
+        },
+        "strong" | "b" => TagStyle {
+            font_size: 16.0,
+            margin: 0.0,
+            bold: true,
+        },
+        _ => TagStyle {
+            font_size: 16.0,
+            margin: 0.0,
+            bold: false,
+        },
     }
 }
 
@@ -193,7 +233,10 @@ mod tests {
         find_by_tag(&page.root, "button", &mut buttons);
         let button_layout = buttons.first().unwrap().layout.unwrap();
 
-        assert!(input_layout.height > 0.0, "empty input should still have real height");
+        assert!(
+            input_layout.height > 0.0,
+            "empty input should still have real height"
+        );
         assert!(
             button_layout.y >= input_layout.y + input_layout.height,
             "button should not overlap the empty input's box"

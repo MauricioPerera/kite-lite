@@ -38,12 +38,16 @@ pub fn lint(page: &Page) -> Vec<SeoFinding> {
     let mut findings = Vec::new();
     let title = page.title.as_deref().unwrap_or("").trim();
     let description = meta_lookup(&page.meta, "description").unwrap_or("").trim();
-    let robots = meta_lookup(&page.meta, "robots").unwrap_or("").to_ascii_lowercase();
+    let robots = meta_lookup(&page.meta, "robots")
+        .unwrap_or("")
+        .to_ascii_lowercase();
 
     if title.is_empty() {
         findings.push(SeoFinding {
             severity: Severity::Error,
-            message: "falta <title>: los buscadores usan esto como el enlace principal en los resultados".to_string(),
+            message:
+                "falta <title>: los buscadores usan esto como el enlace principal en los resultados"
+                    .to_string(),
         });
     } else if title.chars().count() < MIN_TITLE_CHARS || title.chars().count() > MAX_TITLE_CHARS {
         findings.push(SeoFinding {
@@ -53,7 +57,11 @@ pub fn lint(page: &Page) -> Vec<SeoFinding> {
                 title.chars().count(),
                 MIN_TITLE_CHARS,
                 MAX_TITLE_CHARS,
-                if title.chars().count() < MIN_TITLE_CHARS { "es muy corto/vago" } else { "se va a truncar en los resultados de busqueda" }
+                if title.chars().count() < MIN_TITLE_CHARS {
+                    "es muy corto/vago"
+                } else {
+                    "se va a truncar en los resultados de busqueda"
+                }
             ),
         });
     }
@@ -70,7 +78,9 @@ pub fn lint(page: &Page) -> Vec<SeoFinding> {
             severity: Severity::Warning,
             message: "falta <meta name=\"description\">: el buscador va a generar un fragmento automatico, sin control sobre el texto".to_string(),
         });
-    } else if description.chars().count() < MIN_DESCRIPTION_CHARS || description.chars().count() > MAX_DESCRIPTION_CHARS {
+    } else if description.chars().count() < MIN_DESCRIPTION_CHARS
+        || description.chars().count() > MAX_DESCRIPTION_CHARS
+    {
         findings.push(SeoFinding {
             severity: Severity::Warning,
             message: format!(
@@ -78,7 +88,11 @@ pub fn lint(page: &Page) -> Vec<SeoFinding> {
                 description.chars().count(),
                 MIN_DESCRIPTION_CHARS,
                 MAX_DESCRIPTION_CHARS,
-                if description.chars().count() < MIN_DESCRIPTION_CHARS { "es muy corta" } else { "se va a truncar en los resultados de busqueda" }
+                if description.chars().count() < MIN_DESCRIPTION_CHARS {
+                    "es muy corta"
+                } else {
+                    "se va a truncar en los resultados de busqueda"
+                }
             ),
         });
     }
@@ -129,26 +143,36 @@ mod tests {
     #[test]
     fn missing_title_is_an_error() {
         let page = parse_html("<body><h1>Hola</h1></body>");
-        assert!(messages(&lint(&page)).iter().any(|m| m.contains("falta <title>")));
+        assert!(messages(&lint(&page))
+            .iter()
+            .any(|m| m.contains("falta <title>")));
     }
 
     #[test]
     fn noindex_is_an_error() {
-        let page = parse_html(r#"<html><head><title>Titulo largo y razonable aca</title><meta name="robots" content="noindex, nofollow"></head></html>"#);
+        let page = parse_html(
+            r#"<html><head><title>Titulo largo y razonable aca</title><meta name="robots" content="noindex, nofollow"></head></html>"#,
+        );
         let findings = lint(&page);
-        assert!(findings.iter().any(|f| f.severity == Severity::Error && f.message.contains("noindex")));
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Error && f.message.contains("noindex")));
     }
 
     #[test]
     fn short_title_is_a_warning() {
         let page = parse_html("<title>Hola</title>");
-        assert!(messages(&lint(&page)).iter().any(|m| m.contains("muy corto")));
+        assert!(messages(&lint(&page))
+            .iter()
+            .any(|m| m.contains("muy corto")));
     }
 
     #[test]
     fn missing_description_is_a_warning() {
         let page = parse_html("<title>Un titulo de longitud razonable aca</title>");
-        assert!(messages(&lint(&page)).iter().any(|m| m.contains("falta <meta name=\"description\">")));
+        assert!(messages(&lint(&page))
+            .iter()
+            .any(|m| m.contains("falta <meta name=\"description\">")));
     }
 
     #[test]
@@ -158,7 +182,9 @@ mod tests {
                  <meta name="description" content="Una descripcion de longitud razonable que describe bien el contenido de la pagina."></head>
                <body><h2>Subtitulo</h2></body></html>"#,
         );
-        assert!(messages(&lint(&page)).iter().any(|m| m.contains("no hay ningun <h1>")));
+        assert!(messages(&lint(&page))
+            .iter()
+            .any(|m| m.contains("no hay ningun <h1>")));
     }
 
     #[test]
@@ -168,6 +194,8 @@ mod tests {
                  <meta name="description" content="Una descripcion de longitud razonable que describe bien el contenido de la pagina."></head>
                <body><h1>Titulo</h1><p>Poco texto aca.</p></body></html>"#,
         );
-        assert!(messages(&lint(&page)).iter().any(|m| m.contains("palabras")));
+        assert!(messages(&lint(&page))
+            .iter()
+            .any(|m| m.contains("palabras")));
     }
 }

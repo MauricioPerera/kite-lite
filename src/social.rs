@@ -58,7 +58,11 @@ pub fn resolve_preview(page: &Page) -> SocialPreview {
         .or_else(|| meta_lookup(&page.meta, "twitter:image"))
         .map(str::to_string);
 
-    SocialPreview { title, description, image }
+    SocialPreview {
+        title,
+        description,
+        image,
+    }
 }
 
 pub fn lint(page: &Page) -> (SocialPreview, Vec<SocialFinding>) {
@@ -82,7 +86,9 @@ pub fn lint(page: &Page) -> (SocialPreview, Vec<SocialFinding>) {
     if preview.description.is_none() {
         findings.push(SocialFinding {
             severity: Severity::Warning,
-            message: "sin descripcion resoluble (ni meta description/OG/Twitter, ni texto en la pagina)".to_string(),
+            message:
+                "sin descripcion resoluble (ni meta description/OG/Twitter, ni texto en la pagina)"
+                    .to_string(),
         });
     } else if let Some(description) = &preview.description {
         if description.chars().count() > 200 {
@@ -129,7 +135,10 @@ mod tests {
         let (preview, findings) = lint(&page);
         assert_eq!(preview.title.as_deref(), Some("OG Title"));
         assert_eq!(preview.description.as_deref(), Some("OG description"));
-        assert_eq!(preview.image.as_deref(), Some("https://example.com/img.png"));
+        assert_eq!(
+            preview.image.as_deref(),
+            Some("https://example.com/img.png")
+        );
         assert!(findings.is_empty(), "{findings:?}");
     }
 
@@ -148,10 +157,14 @@ mod tests {
 
     #[test]
     fn falls_back_to_html_title_and_body_text() {
-        let page = parse_html(r#"<title>Just a title</title><body>Just some body text here.</body>"#);
+        let page =
+            parse_html(r#"<title>Just a title</title><body>Just some body text here.</body>"#);
         let (preview, findings) = lint(&page);
         assert_eq!(preview.title.as_deref(), Some("Just a title"));
-        assert_eq!(preview.description.as_deref(), Some("Just some body text here."));
+        assert_eq!(
+            preview.description.as_deref(),
+            Some("Just some body text here.")
+        );
         assert!(messages(&findings).iter().any(|m| m.contains("sin imagen")));
     }
 
@@ -160,7 +173,9 @@ mod tests {
         let page = parse_html("<body></body>");
         let (preview, findings) = lint(&page);
         assert!(preview.title.is_none());
-        assert!(findings.iter().any(|f| f.severity == Severity::Error && f.message.contains("sin titulo")));
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Error && f.message.contains("sin titulo")));
     }
 
     #[test]
@@ -175,6 +190,8 @@ mod tests {
     fn relative_image_url_is_an_info_note() {
         let page = parse_html(r#"<meta property="og:image" content="/img.png">"#);
         let (_, findings) = lint(&page);
-        assert!(messages(&findings).iter().any(|m| m.contains("no es una URL absoluta")));
+        assert!(messages(&findings)
+            .iter()
+            .any(|m| m.contains("no es una URL absoluta")));
     }
 }

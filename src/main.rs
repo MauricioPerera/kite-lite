@@ -43,7 +43,10 @@ fn browser_like_headers() -> reqwest::header::HeaderMap {
             .parse()
             .unwrap(),
     );
-    headers.insert(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9".parse().unwrap());
+    headers.insert(
+        reqwest::header::ACCEPT_LANGUAGE,
+        "en-US,en;q=0.9".parse().unwrap(),
+    );
     headers
 }
 
@@ -102,9 +105,9 @@ async fn main() -> Result<()> {
             .map_err(|_| anyhow::anyhow!("mcp thread panicked"))?;
     }
 
-    let url = args.get(1).context(
-        "usage: kite-lite <url> [--svg|--png|--pdf output] [--js code]",
-    )?;
+    let url = args
+        .get(1)
+        .context("usage: kite-lite <url> [--svg|--png|--pdf output] [--js code]")?;
     let client = http_client()?;
     let page = fetch_page(&client, url).await?;
 
@@ -326,7 +329,10 @@ async fn a11y_lint_command(args: &[String]) -> Result<()> {
         }
     }
 
-    let error_count = findings.iter().filter(|f| f.severity == A11ySeverity::Error).count();
+    let error_count = findings
+        .iter()
+        .filter(|f| f.severity == A11ySeverity::Error)
+        .count();
     if error_count > 0 {
         anyhow::bail!("{error_count} error(es) de accesibilidad encontrados");
     }
@@ -350,13 +356,29 @@ async fn social_lint_command(args: &[String]) -> Result<()> {
     let (preview, findings) = lint_social(&page);
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({"preview": preview, "findings": findings}))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &serde_json::json!({"preview": preview, "findings": findings})
+            )?
+        );
     } else {
-        println!("Titulo:      {}", preview.title.as_deref().unwrap_or("(ninguno)"));
-        println!("Descripcion: {}", preview.description.as_deref().unwrap_or("(ninguna)"));
-        println!("Imagen:      {}", preview.image.as_deref().unwrap_or("(ninguna)"));
+        println!(
+            "Titulo:      {}",
+            preview.title.as_deref().unwrap_or("(ninguno)")
+        );
+        println!(
+            "Descripcion: {}",
+            preview.description.as_deref().unwrap_or("(ninguna)")
+        );
+        println!(
+            "Imagen:      {}",
+            preview.image.as_deref().unwrap_or("(ninguna)")
+        );
         if findings.is_empty() {
-            println!("\nSin hallazgos: el preview deberia verse bien en la mayoria de las plataformas.");
+            println!(
+                "\nSin hallazgos: el preview deberia verse bien en la mayoria de las plataformas."
+            );
         } else {
             println!();
             for finding in &findings {
@@ -370,7 +392,10 @@ async fn social_lint_command(args: &[String]) -> Result<()> {
         }
     }
 
-    let error_count = findings.iter().filter(|f| f.severity == SocialSeverity::Error).count();
+    let error_count = findings
+        .iter()
+        .filter(|f| f.severity == SocialSeverity::Error)
+        .count();
     if error_count > 0 {
         anyhow::bail!("{error_count} error(es) de preview social encontrados");
     }
@@ -406,7 +431,10 @@ async fn seo_lint_command(args: &[String]) -> Result<()> {
         }
     }
 
-    let error_count = findings.iter().filter(|f| f.severity == SeoSeverity::Error).count();
+    let error_count = findings
+        .iter()
+        .filter(|f| f.severity == SeoSeverity::Error)
+        .count();
     if error_count > 0 {
         anyhow::bail!("{error_count} error(es) de SEO encontrados");
     }
@@ -473,7 +501,11 @@ fn cdp_command(args: &[String]) -> Result<()> {
             .default_headers(browser_like_headers())
             .build()
     })?;
-    let session = CdpSession { page, client, focused_node_id: None };
+    let session = CdpSession {
+        page,
+        client,
+        focused_node_id: None,
+    };
     let session = Arc::new(Mutex::new(session));
     let listener = TcpListener::bind(address)?;
     eprintln!("kite-lite CDP listening on {address}");
@@ -520,7 +552,10 @@ fn handle_cdp_connection(stream: TcpStream, session: Arc<Mutex<CdpSession>>) -> 
 /// request — the same discovery flow real Chrome's remote-debugging port
 /// supports, and what most CDP client libraries (`connectOverCDP`-style
 /// APIs, `chrome-remote-interface`, etc.) try first.
-fn handle_cdp_http_discovery(mut stream: TcpStream, session: &Arc<Mutex<CdpSession>>) -> Result<()> {
+fn handle_cdp_http_discovery(
+    mut stream: TcpStream,
+    session: &Arc<Mutex<CdpSession>>,
+) -> Result<()> {
     let mut buffer = vec![0_u8; 8192];
     let size = stream.read(&mut buffer)?;
     let request = std::str::from_utf8(&buffer[..size])?;
@@ -532,7 +567,8 @@ fn handle_cdp_http_discovery(mut stream: TcpStream, session: &Arc<Mutex<CdpSessi
     let host = lines
         .find_map(|line| {
             line.split_once(':').and_then(|(name, value)| {
-                name.eq_ignore_ascii_case("host").then(|| value.trim().to_string())
+                name.eq_ignore_ascii_case("host")
+                    .then(|| value.trim().to_string())
             })
         })
         .unwrap_or_else(|| "127.0.0.1:9222".to_string());
@@ -541,7 +577,11 @@ fn handle_cdp_http_discovery(mut stream: TcpStream, session: &Arc<Mutex<CdpSessi
     let (title, url) = match session.lock() {
         Ok(guard) => (
             guard.page.title.clone().unwrap_or_default(),
-            guard.page.url.clone().unwrap_or_else(|| "about:blank".to_string()),
+            guard
+                .page
+                .url
+                .clone()
+                .unwrap_or_else(|| "about:blank".to_string()),
         ),
         Err(_) => (String::new(), "about:blank".to_string()),
     };
@@ -656,7 +696,9 @@ fn handle_cdp(stream: TcpStream, session: Arc<Mutex<CdpSession>>) -> Result<()> 
                     "waitingForDebugger": false
                 }
             });
-            socket.send(Message::Text(serde_json::to_string(&attached_event)?.into()))?;
+            socket.send(Message::Text(
+                serde_json::to_string(&attached_event)?.into(),
+            ))?;
         }
     }
 }
@@ -689,8 +731,12 @@ fn cdp_response(
         "Target.setDiscoverTargets" | "Target.setAutoAttach" | "Target.disposeBrowserContext" => {
             serde_json::json!({})
         }
-        "Target.getTargets" => serde_json::json!({ "targetInfos": [target_info(&session_guard.page)] }),
-        "Target.getTargetInfo" => serde_json::json!({ "targetInfo": target_info(&session_guard.page) }),
+        "Target.getTargets" => {
+            serde_json::json!({ "targetInfos": [target_info(&session_guard.page)] })
+        }
+        "Target.getTargetInfo" => {
+            serde_json::json!({ "targetInfo": target_info(&session_guard.page) })
+        }
         "Target.attachToTarget" | "Target.attachToBrowserTarget" => {
             serde_json::json!({ "sessionId": CDP_SESSION_ID })
         }
@@ -719,7 +765,12 @@ fn cdp_response(
                 .unwrap_or_default();
             let mut next_id = 1;
             let mut node_ids = Vec::new();
-            find_selectors(&session_guard.page.root, selector, &mut next_id, &mut node_ids);
+            find_selectors(
+                &session_guard.page.root,
+                selector,
+                &mut next_id,
+                &mut node_ids,
+            );
             serde_json::json!({"nodeIds": node_ids})
         }
         "DOM.getAttributes" => {
@@ -739,10 +790,16 @@ fn cdp_response(
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0) as u32;
             let mut next_id = 1;
-            match find_node(&session_guard.page.root, node_id, &mut next_id).and_then(|element| element.layout) {
+            match find_node(&session_guard.page.root, node_id, &mut next_id)
+                .and_then(|element| element.layout)
+            {
                 Some(layout) => {
-                    let (x1, y1, x2, y2) =
-                        (layout.x, layout.y, layout.x + layout.width, layout.y + layout.height);
+                    let (x1, y1, x2, y2) = (
+                        layout.x,
+                        layout.y,
+                        layout.x + layout.width,
+                        layout.y + layout.height,
+                    );
                     serde_json::json!({
                         "model": {
                             "content": [x1, y1, x2, y1, x2, y2, x1, y2],
@@ -888,7 +945,11 @@ fn navigate_page(session: &mut CdpSession, url: &str) -> serde_json::Value {
 /// Flattens the small set of attributes this project tracks into CDP's
 /// `["key", "value", "key2", "value2", ...]` attribute array shape.
 fn element_attribute_pairs(element: &kite_lite_core::Element) -> Vec<String> {
-    let href_key = if element.tag == "form" { "action" } else { "href" };
+    let href_key = if element.tag == "form" {
+        "action"
+    } else {
+        "href"
+    };
     [
         (href_key, &element.href),
         ("value", &element.value),
@@ -1123,14 +1184,19 @@ fn find_enclosing_form_submit(page: &kite_lite_core::Page, hit_id: u32) -> Optio
             for (name, value) in &fields {
                 serializer.append_pair(name, value);
             }
-            ClickAction::Submit { action_url, query: serializer.finish() }
+            ClickAction::Submit {
+                action_url,
+                query: serializer.finish(),
+            }
         })
     })
 }
 
 fn collect_form_fields(element: &kite_lite_core::Element, fields: &mut Vec<(String, String)>) {
-    if let (Some(name), true) = (&element.name, matches!(element.tag.as_str(), "input" | "textarea"))
-    {
+    if let (Some(name), true) = (
+        &element.name,
+        matches!(element.tag.as_str(), "input" | "textarea"),
+    ) {
         fields.push((name.clone(), element.value.clone().unwrap_or_default()));
     }
     for child in &element.children {
@@ -1287,8 +1353,8 @@ fn evaluate_js_in_child(
         page: page.clone(),
         script: script.to_owned(),
     })?;
-    let js_binary = env::current_exe()?
-        .with_file_name(format!("kite-lite-js{}", env::consts::EXE_SUFFIX));
+    let js_binary =
+        env::current_exe()?.with_file_name(format!("kite-lite-js{}", env::consts::EXE_SUFFIX));
     let mut child = Command::new(js_binary)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1393,14 +1459,15 @@ fn mcp_command() -> Result<()> {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
 
-        let envelope = match mcp_dispatch(method, request.get("params"), &fetch_client, &mut session) {
-            Ok(result) => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}),
-            Err((code, message)) => serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": {"code": code, "message": message}
-            }),
-        };
+        let envelope =
+            match mcp_dispatch(method, request.get("params"), &fetch_client, &mut session) {
+                Ok(result) => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                Err((code, message)) => serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {"code": code, "message": message}
+                }),
+            };
         writeln!(stdout, "{}", serde_json::to_string(&envelope)?)?;
         stdout.flush()?;
     }
@@ -1556,7 +1623,10 @@ fn mcp_tool_call(
     }
 }
 
-fn require_str<'a>(arguments: &'a serde_json::Value, key: &str) -> std::result::Result<&'a str, String> {
+fn require_str<'a>(
+    arguments: &'a serde_json::Value,
+    key: &str,
+) -> std::result::Result<&'a str, String> {
     arguments
         .get(key)
         .and_then(serde_json::Value::as_str)
@@ -1595,7 +1665,10 @@ fn text_content(text: impl Into<String>) -> serde_json::Value {
 
 /// Blocking-client equivalent of `fetch_page` (the async fn used by the CLI
 /// path), so MCP's tool handlers can stay plain synchronous functions.
-fn fetch_page_blocking(client: &reqwest::blocking::Client, url: &str) -> Result<kite_lite_core::Page> {
+fn fetch_page_blocking(
+    client: &reqwest::blocking::Client,
+    url: &str,
+) -> Result<kite_lite_core::Page> {
     let response = client.get(url).send()?.error_for_status()?;
     let final_url = response.url().to_string();
     let cookies = extract_cookies(response.headers());
@@ -1608,7 +1681,10 @@ fn fetch_page_blocking(client: &reqwest::blocking::Client, url: &str) -> Result<
     Ok(page)
 }
 
-fn render_page_as_content(page: &kite_lite_core::Page, format: &str) -> std::result::Result<serde_json::Value, String> {
+fn render_page_as_content(
+    page: &kite_lite_core::Page,
+    format: &str,
+) -> std::result::Result<serde_json::Value, String> {
     if format == "svg" {
         return Ok(text_content(render_svg(page, 1024)));
     }
@@ -1631,7 +1707,10 @@ fn mcp_render_screenshot(
     arguments: &serde_json::Value,
 ) -> std::result::Result<serde_json::Value, String> {
     let url = require_str(arguments, "url")?;
-    let format = arguments.get("format").and_then(serde_json::Value::as_str).unwrap_or("png");
+    let format = arguments
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("png");
     let page = fetch_page_blocking(client, url).map_err(|error| error.to_string())?;
     render_page_as_content(&page, format)
 }
@@ -1643,7 +1722,8 @@ fn mcp_eval_js(
     let url = require_str(arguments, "url")?;
     let script = require_str(arguments, "script")?;
     let page = fetch_page_blocking(client, url).map_err(|error| error.to_string())?;
-    let value = evaluate_js_in_child(&page, script, JS_TIMEOUT).map_err(|error| error.to_string())?;
+    let value =
+        evaluate_js_in_child(&page, script, JS_TIMEOUT).map_err(|error| error.to_string())?;
     Ok(text_content(value))
 }
 
@@ -1669,7 +1749,10 @@ fn mcp_browser_click(
         return Err(format!("no element matches selector '{selector}'"));
     };
     let action = plan_action_for_node(&session.page, node_id);
-    let navigated = matches!(action, ClickAction::Navigate(_) | ClickAction::Submit { .. });
+    let navigated = matches!(
+        action,
+        ClickAction::Navigate(_) | ClickAction::Submit { .. }
+    );
     let outcome = apply_click_action(session, action);
     if let Some(error_text) = outcome.get("errorText").and_then(serde_json::Value::as_str) {
         return Err(error_text.to_string());
@@ -1691,8 +1774,9 @@ fn mcp_browser_call_tool(
     let tool_name = require_str(arguments, "name")?;
     let empty = serde_json::json!({});
     let tool_arguments = arguments.get("arguments").unwrap_or(&empty);
-    let (action_url, query) = kite_lite_core::build_webmcp_submission(&session.page, tool_name, tool_arguments)
-        .ok_or_else(|| format!("no WebMCP tool named '{tool_name}' on the current page"))?;
+    let (action_url, query) =
+        kite_lite_core::build_webmcp_submission(&session.page, tool_name, tool_arguments)
+            .ok_or_else(|| format!("no WebMCP tool named '{tool_name}' on the current page"))?;
     let separator = if action_url.contains('?') { "&" } else { "?" };
     let target = if query.is_empty() {
         action_url
@@ -1711,7 +1795,10 @@ fn mcp_browser_type(
     arguments: &serde_json::Value,
 ) -> std::result::Result<serde_json::Value, String> {
     let text = require_str(arguments, "text")?;
-    if let Some(selector) = arguments.get("selector").and_then(serde_json::Value::as_str) {
+    if let Some(selector) = arguments
+        .get("selector")
+        .and_then(serde_json::Value::as_str)
+    {
         let mut next_id = 1;
         let Some(node_id) = find_selector(&session.page.root, selector, &mut next_id) else {
             return Err(format!("no element matches selector '{selector}'"));
@@ -1729,7 +1816,10 @@ fn mcp_browser_get_dom(
     session: &mut CdpSession,
     arguments: &serde_json::Value,
 ) -> std::result::Result<serde_json::Value, String> {
-    match arguments.get("selector").and_then(serde_json::Value::as_str) {
+    match arguments
+        .get("selector")
+        .and_then(serde_json::Value::as_str)
+    {
         Some(selector) => {
             let mut next_id = 1;
             let Some(node_id) = find_selector(&session.page.root, selector, &mut next_id) else {
@@ -1749,7 +1839,10 @@ fn mcp_browser_screenshot(
     session: &mut CdpSession,
     arguments: &serde_json::Value,
 ) -> std::result::Result<serde_json::Value, String> {
-    let format = arguments.get("format").and_then(serde_json::Value::as_str).unwrap_or("png");
+    let format = arguments
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("png");
     render_page_as_content(&session.page, format)
 }
 
@@ -1759,13 +1852,15 @@ mod tests {
 
     #[test]
     fn html_escape_escapes_reserved_characters() {
-        assert_eq!(
-            html_escape("<a> & \"b\""),
-            "&lt;a&gt; &amp; &quot;b&quot;"
-        );
+        assert_eq!(html_escape("<a> & \"b\""), "&lt;a&gt; &amp; &quot;b&quot;");
     }
 
-    fn el(tag: &str, text: &str, href: Option<&str>, children: Vec<kite_lite_core::Element>) -> kite_lite_core::Element {
+    fn el(
+        tag: &str,
+        text: &str,
+        href: Option<&str>,
+        children: Vec<kite_lite_core::Element>,
+    ) -> kite_lite_core::Element {
         kite_lite_core::Element {
             tag: tag.to_string(),
             text: text.to_string(),
@@ -1790,7 +1885,10 @@ mod tests {
             "document",
             "",
             None,
-            vec![el("p", "One", None, Vec::new()), el("p", "Two", None, Vec::new())],
+            vec![
+                el("p", "One", None, Vec::new()),
+                el("p", "Two", None, Vec::new()),
+            ],
         );
         assert_eq!(element_html(&root), "<p>One</p><p>Two</p>");
     }

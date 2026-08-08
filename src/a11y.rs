@@ -93,7 +93,10 @@ fn find_html_element(element: &Element) -> Option<&Element> {
 }
 
 fn collect_headings<'a>(element: &'a Element, headings: &mut Vec<&'a Element>) {
-    if matches!(element.tag.as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
+    if matches!(
+        element.tag.as_str(),
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+    ) {
         headings.push(element);
     }
     for child in &element.children {
@@ -156,7 +159,9 @@ mod tests {
     #[test]
     fn image_without_alt_is_flagged() {
         let page = parse_html(r#"<img src="x.png">"#);
-        assert!(messages(&lint(&page)).iter().any(|m| m.contains("sin atributo 'alt'")));
+        assert!(messages(&lint(&page))
+            .iter()
+            .any(|m| m.contains("sin atributo 'alt'")));
     }
 
     #[test]
@@ -168,30 +173,40 @@ mod tests {
     #[test]
     fn heading_level_skip_is_flagged() {
         let page = parse_html(r#"<h1>Titulo</h1><h3>Subtitulo</h3>"#);
-        assert!(messages(&lint(&page)).iter().any(|m| m.contains("salto de nivel")));
+        assert!(messages(&lint(&page))
+            .iter()
+            .any(|m| m.contains("salto de nivel")));
     }
 
     #[test]
     fn multiple_h1_is_flagged() {
         let page = parse_html(r#"<h1>Uno</h1><h1>Dos</h1>"#);
-        assert!(messages(&lint(&page)).iter().any(|m| m.contains("2 elementos <h1>")));
+        assert!(messages(&lint(&page))
+            .iter()
+            .any(|m| m.contains("2 elementos <h1>")));
     }
 
     #[test]
     fn empty_link_without_image_is_flagged() {
         let page = parse_html(r#"<a href="/x"></a>"#);
-        assert!(messages(&lint(&page)).iter().any(|m| m.contains("sin texto ni imagen")));
+        assert!(messages(&lint(&page))
+            .iter()
+            .any(|m| m.contains("sin texto ni imagen")));
     }
 
     #[test]
     fn link_with_described_image_is_not_flagged() {
-        let page = parse_html(r#"<html lang="es"><a href="/x"><img src="icon.png" alt="ir a x"></a></html>"#);
+        let page = parse_html(
+            r#"<html lang="es"><a href="/x"><img src="icon.png" alt="ir a x"></a></html>"#,
+        );
         assert!(lint(&page).is_empty());
     }
 
     #[test]
     fn missing_lang_is_flagged() {
         let page = parse_html(r#"<html><body><p>hola</p></body></html>"#);
-        assert!(messages(&lint(&page)).iter().any(|m| m.contains("sin atributo 'lang'")));
+        assert!(messages(&lint(&page))
+            .iter()
+            .any(|m| m.contains("sin atributo 'lang'")));
     }
 }
