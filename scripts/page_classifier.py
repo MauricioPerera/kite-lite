@@ -34,6 +34,22 @@ MODEL = os.environ.get("OLLAMA_MODEL", "gpt-oss:20b-cloud")
 UNCLASSIFIED = "SIN_CLASIFICAR"
 
 
+def parse_json_response(content):
+    """Ollama's `format: "json"` doesn't guarantee fence-free output for
+    every model — some (glm-5.2:cloud observed doing this) still wrap the
+    JSON in a ```json ... ``` markdown block. Strip that before parsing."""
+    stripped = content.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.strip("`")
+        if stripped.lower().startswith("json"):
+            stripped = stripped[4:]
+        stripped = stripped.strip()
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"respuesta del modelo no es JSON valido: {content[:300]!r}") from error
+
+
 def fetch_page(url):
     proc = subprocess.run([BINARY, "fetch", url], capture_output=True, text=True, timeout=30)
     if proc.returncode != 0:
@@ -55,7 +71,7 @@ def classify(title, text, categories):
     req = urllib.request.Request(OLLAMA_URL, data=body, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=120) as resp:
         data = json.loads(resp.read())
-    result = json.loads(data["message"]["content"])
+    result = parse_json_response(data["message"]["content"])
     if result.get("category") not in categories:
         result["category"] = UNCLASSIFIED
     return result

@@ -34,6 +34,22 @@ MODEL = os.environ.get("OLLAMA_MODEL", "gpt-oss:20b-cloud")
 BLOCK_TAGS = {"p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "td", "th"}
 
 
+def parse_json_response(content):
+    """Ollama's `format: "json"` doesn't guarantee fence-free output for
+    every model — some (glm-5.2:cloud observed doing this) still wrap the
+    JSON in a ```json ... ``` markdown block. Strip that before parsing."""
+    stripped = content.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.strip("`")
+        if stripped.lower().startswith("json"):
+            stripped = stripped[4:]
+        stripped = stripped.strip()
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"respuesta del modelo no es JSON valido: {content[:300]!r}") from error
+
+
 def fetch_page(url):
     proc = subprocess.run([BINARY, "fetch", url], capture_output=True, text=True, timeout=30)
     if proc.returncode != 0:
@@ -66,7 +82,7 @@ def translate_blocks(blocks, target_language):
     req = urllib.request.Request(OLLAMA_URL, data=body, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=180) as resp:
         data = json.loads(resp.read())
-    result = json.loads(data["message"]["content"])
+    result = parse_json_response(data["message"]["content"])
     translations = result.get("translations", [])
     if len(translations) != len(blocks):
         raise RuntimeError(f"se esperaban {len(blocks)} traducciones, se recibieron {len(translations)}")
