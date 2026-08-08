@@ -1,6 +1,6 @@
 # kite-lite
 
-<!-- mcp-name: io.github.MauricioPerera/kite-lite -->
+mcp-name: io.github.MauricioPerera/kite-lite
 
 Motor web ligero, autocontenido y orientado a agentes. Está diseñado para
 ejecutarse fuera de Cloudflare en un VPS o contenedor, con un parser HTML,
