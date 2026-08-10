@@ -2,8 +2,10 @@
 FROM rust:latest AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-RUN cargo build --release --locked
+COPY kite-lite-core ./kite-lite-core
+COPY kite-lite-js ./kite-lite-js
+COPY kite-lite ./kite-lite
+RUN cargo build --release --locked --workspace
 
 # Small, non-root runtime image.
 FROM debian:trixie-slim

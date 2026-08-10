@@ -1,10 +1,12 @@
 //! Standalone JavaScript evaluator, spawned as a child process by `kite-lite`.
 //!
-//! This binary intentionally does not depend on `reqwest`/`tokio`, so it
-//! cannot make network requests even if it wanted to: the isolation is a
-//! property of what's linked into the executable, not just of what the
-//! code chooses to call. It reads a JSON `EvalRequest` from stdin and
-//! writes a JSON `EvalResponse` to stdout.
+//! This is its own crate (`kite-lite-js/Cargo.toml`), and that Cargo.toml
+//! does not list `reqwest`/`tokio` as dependencies — so it cannot make
+//! network requests even if it wanted to, and no future change to this
+//! file or to `kite-lite-core` can silently add that capability back: the
+//! isolation is enforced by the dependency graph, not by a convention
+//! someone has to remember to uphold. It reads a JSON `EvalRequest` from
+//! stdin and writes a JSON `EvalResponse` to stdout.
 
 use anyhow::Result;
 use kite_lite_core::{EvalRequest, EvalResponse, JsRuntime};

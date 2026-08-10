@@ -1,33 +1,16 @@
-[package]
-name = "kite-lite"
-version = "0.1.3"
-edition = "2021"
-description = "A lightweight, agent-first web page engine"
-license = "MIT"
-repository = "https://github.com/MauricioPerera/kite-lite"
-readme = "README.md"
+[workspace]
+resolver = "2"
+members = ["kite-lite-core", "kite-lite-js", "kite-lite"]
+# So bare `cargo run -- ...`/`cargo run -- serve ...` at the repo root (as
+# the README's "Probarlo" section documents) keeps working unambiguously —
+# without this, `cargo run` at a workspace root with two binary-producing
+# members (`kite-lite`, `kite-lite-js`) refuses to guess which one to run.
+default-members = ["kite-lite"]
 
-[dependencies]
-anyhow = "1"
-base64 = "0.22"
-boa_engine = "0.20"
-html5ever = "0.27"
-markup5ever_rcdom = "0.3"
-printpdf = { version = "0.7", default-features = false, features = ["embedded_images"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "cookies"] }
-resvg = "0.44"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tiny-skia = "0.11"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-tungstenite = "0.30"
-url = "2"
-usvg = "0.44"
-
-[lib]
-name = "kite_lite_core"
-crate-type = ["rlib", "cdylib"]
-
-[[bin]]
-name = "kite-lite"
-path = "src/main.rs"
+# `kite-lite-js` deliberately has no path to `reqwest`/`tokio` in its own
+# Cargo.toml (see kite-lite-js/Cargo.toml) — that's the actual enforcement
+# mechanism for the isolation this project's README describes: not a
+# convention someone has to remember, but a dependency graph that won't
+# compile if anyone adds `use reqwest` there or to `kite-lite-core`. See the
+# README's "Probarlo" section for why that binary exists as a separate
+# process at all.
