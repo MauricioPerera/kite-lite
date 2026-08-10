@@ -3,9 +3,12 @@ alerts when it drops to or below a threshold. Persists the last known
 price per site so it reports real changes across runs, not just the
 same number every time.
 
-Honest constraint: kite-lite's selector matching is tag-name only (see
-find_selector in src/main.rs — no class/id/attribute support), so there's
-no precise per-site "grab this exact element" targeting. This extracts
+Honest constraint: kite-lite's selector matching is tag name, or a
+`type`/`name` attribute filter (see find_selector in
+kite-lite/src/main.rs) — no class/id/data-* support, since Element has
+no general attribute bag. A price element is essentially never
+identified by `type` or `name`, so there's still no precise per-site
+"grab this exact element" targeting. This extracts
 the price with a regex against the page's flattened text instead —
 works without per-site configuration for simple product pages, with an
 optional custom `pattern` per site for pages where the default doesn't

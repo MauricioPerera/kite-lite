@@ -1,7 +1,7 @@
 """Cookie/privacy auditor: navigates to a URL and reports exactly which
 cookies the server set on that very first load — before any user
 interaction — using kite-lite's Set-Cookie capture (added to the core
-for this: see Page.cookies / parse_set_cookie in src/lib.rs). Flags
+for this: see Page.cookies / parse_set_cookie in kite-lite-core/src/lib.rs). Flags
 cookies with common tracking-related names, and whether the page shows
 any visible mention of cookies/consent at all.
 

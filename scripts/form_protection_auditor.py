@@ -7,9 +7,12 @@ Hard limitation, stated upfront: kite-lite doesn't execute page
 JavaScript and doesn't capture class/id/data-* attributes, so it
 CANNOT see a real reCAPTCHA/hCaptcha/Turnstile widget — those are
 injected by JS and identified by class/data attributes this project
-doesn't track (see src/main.rs's find_selector: matching is tag-name
-only). A "sin proteccion visible" result means exactly that — no
-visible signal was found — NOT a confirmed absence of protection.
+doesn't track (Element has no general attribute bag; see
+kite-lite/src/main.rs's find_selector, which only matches by tag name
+or a `type`/`name` filter — neither helps here, since captcha widgets
+aren't identified by either). A "sin proteccion visible" result means
+exactly that — no visible signal was found — NOT a confirmed absence
+of protection.
 Treat this as a quick heuristic pass, not a security audit.
 
 Usage:
