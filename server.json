@@ -3,7 +3,7 @@
   "name": "io.github.MauricioPerera/kite-lite",
   "title": "kite-lite",
   "description": "Fetch, parse, screenshot and browse pages via MCP without a real browser -- no JS execution.",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "websiteUrl": "https://github.com/MauricioPerera/kite-lite",
   "repository": {
     "url": "https://github.com/MauricioPerera/kite-lite",

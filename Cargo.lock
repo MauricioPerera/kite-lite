@@ -1118,7 +1118,7 @@ dependencies = [
 
 [[package]]
 name = "kite-lite"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "base64",
@@ -1133,7 +1133,7 @@ dependencies = [
 
 [[package]]
 name = "kite-lite-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "boa_engine",
@@ -1150,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "kite-lite-js"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "kite-lite-core",
