@@ -27,6 +27,68 @@ El núcleo DOM en Rust:
   renderiza a PNG y PDF además de SVG — ver "Renderizado PNG/PDF";
   se puede correr como servidor MCP por stdio — ver "Servidor MCP".
 
+## Capacidades para un agente
+
+kite-lite le da a un agente acceso a la web sin arrastrar un navegador real
+(Chromium/Playwright) — pico de memoria medido de ~4-7 MiB (ver "Recursos
+mínimos"), arranque en milisegundos, corre bajo `--network=none`/
+`--cap-drop=ALL`/`--read-only` sin romperse. Eso cambia el cálculo de costo:
+en vez de una instancia pesada compartida, es viable levantar una por tarea,
+en paralelo, en un VPS chico.
+
+Lo que habilita, concretamente:
+
+- **Lectura barata de páginas** (`fetch_page`) — resumen liviano
+  (título/texto/links), no el DOM completo con layout. Ahorra contexto
+  frente a devolver HTML crudo cuando el agente solo necesita "qué dice
+  esta página".
+- **Sesión con estado** (`browser_navigate` + cookies/redirecciones
+  persistentes) — flujos de varios pasos (login → página protegida),
+  mientras el flujo no dependa de JS del lado cliente.
+- **Interacción de formularios sin ejecutar JS de la página** — click,
+  tipeo, submit — como un navegador con JavaScript desactivado (ver
+  "Interacción: click, escritura y submit de formularios"), con selectores
+  por tag, `type` o `name`.
+- **JS aislado y verificable** (`eval_js`) — extraer un valor calculado o
+  probar una expresión, con garantías reales de sandboxing: sin red, sin
+  filesystem, en un proceso separado que ni siquiera puede linkear
+  `reqwest`/`tokio` (ver "Servidor MCP").
+- **Visual barato** (`render_screenshot`/`browser_screenshot`) — para
+  verificación aproximada o reportes, no para QA visual pixel-perfect (ver
+  "Layout mínimo").
+- **Auditoría estructurada, no basada en juicio de LLM** — los cuatro
+  linters (`webmcp-lint`, `a11y-lint`, `seo-lint`, `social-lint`) le dan a
+  un agente que construye o revisa sitios un gate determinista y barato,
+  sin gastar una llamada a un modelo para chequear si falta un
+  `<meta description>`.
+- **WebMCP declarativo** (`browser_call_tool`) — si el sitio objetivo
+  publica formularios anotados, el agente consume una interfaz con schema
+  en vez de adivinar selectores (ver "Soporte declarativo de WebMCP").
+
+Los límites duros, por diseño — no son bugs, son la contracara directa de
+lo anterior (ver "Próximas capas" para el porqué):
+
+- **Nada de contenido dependiente de JS del cliente** — SPAs, contenido
+  cargado por `fetch` del lado cliente, cualquier framework que renderiza
+  en el navegador, es invisible.
+- **Sin interacción real** — no corre `onclick` ni ningún evento de
+  verdad, solo navegación (`<a>`) y submit GET.
+- **Solo GET en formularios** — un `method="post"` real no se puede
+  enviar con cuerpo.
+- **Sin multi-pestaña**, sin drag&drop, sin upload de archivos, sin
+  scroll infinito.
+- **No es Playwright** — el WebSocket CDP conecta, pero cualquier acción
+  que dependa de `Runtime.callFunctionOn` contra un DOM vivo (así opera
+  Playwright internamente) no funciona (ver "Compatibilidad CDP").
+
+Tiene sentido para: contenido servido en HTML plano (blogs, docs, la
+mayoría de sitios de contenido, APIs que devuelven HTML, formularios GET
+simples), lectura/extracción/auditoría en volumen donde el costo de un
+navegador real no se justifica, o cualquier caso donde el aislamiento (sin
+red desde el JS, sin DOM vivo) es una ventaja de seguridad, no una
+limitación. Para SPAs, interacción compleja, o sitios que validan con JS
+del cliente, hace falta un navegador real — no hay atajo.
+
 ## Probarlo
 
 ```powershell
