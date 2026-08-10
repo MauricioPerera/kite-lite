@@ -1064,19 +1064,67 @@ fn cdp_node(element: &kite_lite_core::Element, next_id: &mut u32) -> serde_json:
     })
 }
 
+/// A parsed selector: a tag name (or `"*"` for any tag) plus an optional
+/// `[attr=value]` filter. Deliberately minimal, not real CSS — no classes,
+/// ids, or combinators, and only `type`/`name` are recognized as
+/// attributes, because those are the only ones `Element` tracks as their
+/// own typed field (`kind`/`name`); there's no general attribute bag to
+/// match an arbitrary `[attr=value]` against.
+struct Selector<'a> {
+    tag: &'a str,
+    attr: Option<(&'a str, &'a str)>,
+}
+
+fn parse_selector(selector: &str) -> Selector<'_> {
+    match selector.split_once('[') {
+        Some((tag, rest)) => Selector {
+            tag: if tag.is_empty() { "*" } else { tag },
+            attr: rest
+                .strip_suffix(']')
+                .and_then(|inner| inner.split_once('=')),
+        },
+        None => Selector {
+            tag: selector,
+            attr: None,
+        },
+    }
+}
+
+fn selector_matches(element: &kite_lite_core::Element, selector: &Selector) -> bool {
+    if element.tag == "document" {
+        return false;
+    }
+    if selector.tag != "*" && !element.tag.eq_ignore_ascii_case(selector.tag) {
+        return false;
+    }
+    match selector.attr {
+        None => true,
+        Some(("type", value)) => element.kind.as_deref() == Some(value),
+        Some(("name", value)) => element.name.as_deref() == Some(value),
+        Some(_) => false,
+    }
+}
+
 fn find_selector(
     element: &kite_lite_core::Element,
     selector: &str,
     next_id: &mut u32,
 ) -> Option<u32> {
+    find_selector_parsed(element, &parse_selector(selector), next_id)
+}
+
+fn find_selector_parsed(
+    element: &kite_lite_core::Element,
+    selector: &Selector,
+    next_id: &mut u32,
+) -> Option<u32> {
     let current_id = *next_id;
     *next_id += 1;
-    let matches = selector == "*" || element.tag.eq_ignore_ascii_case(selector);
-    if matches && element.tag != "document" {
+    if selector_matches(element, selector) {
         return Some(current_id);
     }
     for child in &element.children {
-        if let Some(node_id) = find_selector(child, selector, next_id) {
+        if let Some(node_id) = find_selector_parsed(child, selector, next_id) {
             return Some(node_id);
         }
     }
@@ -1089,14 +1137,22 @@ fn find_selectors(
     next_id: &mut u32,
     matches: &mut Vec<u32>,
 ) {
+    find_selectors_parsed(element, &parse_selector(selector), next_id, matches)
+}
+
+fn find_selectors_parsed(
+    element: &kite_lite_core::Element,
+    selector: &Selector,
+    next_id: &mut u32,
+    matches: &mut Vec<u32>,
+) {
     let current_id = *next_id;
     *next_id += 1;
-    if (selector == "*" || element.tag.eq_ignore_ascii_case(selector)) && element.tag != "document"
-    {
+    if selector_matches(element, selector) {
         matches.push(current_id);
     }
     for child in &element.children {
-        find_selectors(child, selector, next_id, matches);
+        find_selectors_parsed(child, selector, next_id, matches);
     }
 }
 
@@ -1725,7 +1781,7 @@ fn mcp_tool_definitions() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "browser_click",
-            "description": "Click the first element in the current session page matching a CSS-like selector (tag name). Clicking <a href> navigates; clicking <input>/<textarea> focuses it for browser_type; clicking a submit button or input[type=submit] submits its enclosing form (GET only, no request body) and navigates. This does not run onclick handlers or any page JavaScript.",
+            "description": "Click the first element in the current session page matching a selector: a tag name (e.g. \"button\"), \"*\" for any tag, or tag[attr=value]/[attr=value] filtering by the type or name attribute (e.g. \"input[type=submit]\", \"[name=q]\") -- not full CSS, no classes/ids/combinators/other attributes. Clicking <a href> navigates; clicking <input>/<textarea> focuses it for browser_type; clicking a submit button or input[type=submit] submits its enclosing form (GET only, no request body) and navigates. This does not run onclick handlers or any page JavaScript.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"selector": {"type": "string"}},
@@ -2192,6 +2248,65 @@ mod tests {
         );
         let node_ids = select_all["result"]["nodeIds"].as_array().unwrap();
         assert_eq!(node_ids.len(), 2);
+    }
+
+    #[test]
+    fn selector_attribute_filter_distinguishes_same_tag_elements() {
+        // Real case this fixes: a text input and a submit button are both
+        // <input>, so a bare tag selector can only ever reach the first one
+        // in document order. `[type=submit]` needs to reach the second.
+        let session = test_session(parse_html(
+            r#"<body><form><input name="q" type="text"><input name="go" type="submit"></form></body>"#,
+        ));
+        let text_field = cdp_response(
+            serde_json::json!(1),
+            "DOM.querySelector",
+            Some(&serde_json::json!({"selector": "input[type=text]"})),
+            &session,
+        );
+        let submit_button = cdp_response(
+            serde_json::json!(2),
+            "DOM.querySelector",
+            Some(&serde_json::json!({"selector": "input[type=submit]"})),
+            &session,
+        );
+        let text_id = text_field["result"]["nodeId"].as_u64().unwrap();
+        let submit_id = submit_button["result"]["nodeId"].as_u64().unwrap();
+        assert_ne!(
+            text_id, submit_id,
+            "the two selectors must resolve to different nodes"
+        );
+
+        let text_outer = cdp_response(
+            serde_json::json!(3),
+            "DOM.getOuterHTML",
+            Some(&serde_json::json!({"nodeId": text_id})),
+            &session,
+        );
+        let submit_outer = cdp_response(
+            serde_json::json!(4),
+            "DOM.getOuterHTML",
+            Some(&serde_json::json!({"nodeId": submit_id})),
+            &session,
+        );
+        assert!(text_outer["result"]["outerHTML"]
+            .as_str()
+            .unwrap()
+            .contains(r#"name="q""#));
+        assert!(submit_outer["result"]["outerHTML"]
+            .as_str()
+            .unwrap()
+            .contains(r#"name="go""#));
+
+        // [name=...] on its own (no tag) also needs to work, since it's the
+        // other field kite-lite already tracks as a typed attribute.
+        let by_name = cdp_response(
+            serde_json::json!(5),
+            "DOM.querySelector",
+            Some(&serde_json::json!({"selector": "[name=go]"})),
+            &session,
+        );
+        assert_eq!(by_name["result"]["nodeId"].as_u64().unwrap(), submit_id);
     }
 
     #[test]

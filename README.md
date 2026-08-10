@@ -314,7 +314,13 @@ Herramientas expuestas, todas sobre el motor ya existente:
   proyecto. `browser_click` reusa la misma lógica de
   "Interacción: click, escritura y submit de formularios" pero ubicando el
   elemento por selector en vez de coordenada `y` — más natural para una
-  herramienta MCP.
+  herramienta MCP. El selector no es CSS real: `tag` (nombre exacto, p. ej.
+  `button`), `*` para cualquier tag, o `tag[attr=value]`/`[attr=value]`
+  filtrando por `type` o `name` (p. ej. `input[type=submit]`) — los únicos
+  dos atributos que el DOM interno guarda como campo propio. Sin clases,
+  ids, ni combinadores. Esto importa en la práctica: un `<input type=text>`
+  y un `<input type=submit>` comparten tag, así que sin el filtro por
+  atributo solo se puede alcanzar el primero en orden del documento.
 
 Un error de una herramienta (selector que no matchea, fetch fallido, etc.)
 se devuelve como `isError: true` con el mensaje en el contenido — así el
