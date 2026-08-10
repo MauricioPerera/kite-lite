@@ -8,5 +8,22 @@
   "repository": {
     "url": "https://github.com/MauricioPerera/kite-lite",
     "source": "github"
-  }
+  },
+  "packages": [
+    {
+      "registryType": "cargo",
+      "registryBaseUrl": "https://crates.io",
+      "identifier": "kite-lite",
+      "version": "0.1.4",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ]
+    }
+  ]
 }
