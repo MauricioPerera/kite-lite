@@ -47,6 +47,18 @@ fn load_fonts(fontdb: &mut usvg::fontdb::Database) {
     }
 }
 
+/// Caps the total pixel count `render_png` will allocate a canvas for.
+/// Layout has no upper bound on height — elements stack vertically without
+/// limit (see the README's "Layout mínimo") — so a page with enough text
+/// produces an arbitrarily tall rendered SVG; without this, rasterizing it
+/// would allocate `width * height * 4` bytes with no ceiling, reachable via
+/// `/v1/render`, the MCP screenshot tool, or the CLI on any untrusted URL or
+/// HTML. Chosen to comfortably fit inside this project's own measured
+/// resource envelope (README: ~4.5 MiB peak for a simple page, 32 MiB
+/// recommended minimum for production) rather than any format-specific
+/// limit.
+const MAX_RASTER_PIXELS: u64 = 8_000_000;
+
 /// Rasterizes the page's SVG rendering (see `render_svg`) to PNG bytes at
 /// the given viewport width.
 ///
@@ -62,6 +74,13 @@ pub fn render_png(page: &Page, width: u32) -> Result<Vec<u8>> {
     load_fonts(options.fontdb_mut());
     let tree = usvg::Tree::from_str(&svg, &options).context("failed to parse rendered SVG")?;
     let size = tree.size().to_int_size();
+    let pixel_count = u64::from(size.width()) * u64::from(size.height());
+    anyhow::ensure!(
+        pixel_count <= MAX_RASTER_PIXELS,
+        "rendered page is {}x{} ({pixel_count} pixels), over the {MAX_RASTER_PIXELS}-pixel raster limit",
+        size.width(),
+        size.height()
+    );
     let mut pixmap = tiny_skia::Pixmap::new(size.width(), size.height())
         .context("rendered page has invalid pixel dimensions")?;
     resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
@@ -131,6 +150,22 @@ mod tests {
             .iter()
             .any(|pixel| pixel.red() != 255 || pixel.green() != 255 || pixel.blue() != 255);
         assert!(has_non_white_pixel, "rendered PNG is entirely blank/white");
+    }
+
+    #[test]
+    fn rejects_a_page_tall_enough_to_exceed_the_raster_pixel_limit() {
+        // Layout stacks every element vertically with no height cap, so
+        // enough paragraphs make an arbitrarily tall SVG. At width 320 this
+        // needs roughly 25,000px of height to cross MAX_RASTER_PIXELS
+        // (8,000,000) — a few thousand short paragraphs comfortably clears
+        // that without needing a pathologically large fixture.
+        let body: String = "<p>filler</p>".repeat(4000);
+        let page = parse_html(&format!("<html><body>{body}</body></html>"));
+        let error = render_png(&page, 320).expect_err("expected the raster limit to reject this");
+        assert!(
+            error.to_string().contains("raster limit"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
