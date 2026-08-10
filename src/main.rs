@@ -18,6 +18,11 @@ const JS_TIMEOUT: Duration = Duration::from_millis(1500);
 /// fetching can't hang a request (and, for the CDP/MCP clients, the shared
 /// session) indefinitely.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Caps how much a single request to `serve`'s control API may total
+/// (headers + body), so a client that never finishes sending (or claims an
+/// enormous `Content-Length`) can't grow `read_http_request`'s buffer
+/// without bound.
+const MAX_HTTP_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 /// Viewport width used to compute each page's layout when no explicit
 /// render width is requested yet (e.g. right after `fetch`/navigate, before
 /// anyone calls `render`). `render_svg` recomputes layout at whatever width
@@ -450,12 +455,17 @@ fn serve_command(args: &[String]) -> Result<()> {
     let address = args.get(2).map(String::as_str).unwrap_or("127.0.0.1:8787");
     let listener = TcpListener::bind(address)?;
     eprintln!("kite-lite control API listening on {address}");
+    // One thread per connection, same as `cdp_command` — otherwise a single
+    // slow/stalled client (deliberately or not) would starve every other
+    // request against this server, since `handle_http` blocks on I/O.
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(error) = handle_http(stream) {
-                    eprintln!("request error: {error}");
-                }
+                std::thread::spawn(move || {
+                    if let Err(error) = handle_http(stream) {
+                        eprintln!("request error: {error}");
+                    }
+                });
             }
             Err(error) => eprintln!("connection error: {error}"),
         }
@@ -1372,10 +1382,64 @@ fn html_escape(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Reads a full HTTP/1.1 request (headers, then a `Content-Length` body if
+/// one is declared) off `stream`. A single `read()` isn't guaranteed to
+/// return a whole request in one shot — a body split across TCP segments
+/// (common for anything past a few KB, e.g. `/v1/parse`/`/v1/render` with a
+/// real page) would otherwise get silently truncated at whatever happened
+/// to arrive first. Loops until the `\r\n\r\n` header terminator is seen and
+/// then until `Content-Length` bytes of body have arrived, bounded by
+/// `MAX_HTTP_REQUEST_BYTES` so a request that never completes (or lies
+/// about its length) can't grow this buffer without limit.
+fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    let header_end = loop {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            anyhow::bail!("connection closed before request headers completed");
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.len() > MAX_HTTP_REQUEST_BYTES {
+            anyhow::bail!("request exceeds {MAX_HTTP_REQUEST_BYTES}-byte limit");
+        }
+        if let Some(pos) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            break pos + 4;
+        }
+    };
+
+    let content_length = std::str::from_utf8(&buffer[..header_end])
+        .ok()
+        .and_then(|headers| {
+            headers.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.trim()
+                    .eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+        })
+        .unwrap_or(0);
+
+    let total_len = header_end
+        .checked_add(content_length)
+        .filter(|&total| total <= MAX_HTTP_REQUEST_BYTES)
+        .context("request exceeds MAX_HTTP_REQUEST_BYTES-byte limit")?;
+    while buffer.len() < total_len {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            anyhow::bail!("connection closed before request body completed");
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+    buffer.truncate(total_len);
+    Ok(buffer)
+}
+
 fn handle_http(mut stream: TcpStream) -> Result<()> {
-    let mut buffer = vec![0_u8; 2 * 1024 * 1024];
-    let size = stream.read(&mut buffer)?;
-    let request = std::str::from_utf8(&buffer[..size])?;
+    stream.set_read_timeout(Some(HTTP_TIMEOUT))?;
+    let buffer = read_http_request(&mut stream)?;
+    let request = std::str::from_utf8(&buffer)?;
     let (headers, body) = request
         .split_once("\r\n\r\n")
         .context("malformed HTTP request")?;
