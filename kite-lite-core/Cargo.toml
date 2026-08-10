@@ -1,6 +1,6 @@
 [package]
 name = "kite-lite-core"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "DOM, layout, JS sandbox, and rendering engine behind kite-lite. No networking dependency."
 license = "MIT"

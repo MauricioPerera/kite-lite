@@ -1,6 +1,6 @@
 [package]
 name = "kite-lite-js"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "Standalone JavaScript evaluator child process for kite-lite. Has no reqwest/tokio dependency declared, so it cannot make network requests regardless of what a script tries to do."
 license = "MIT"
@@ -9,4 +9,4 @@ repository = "https://github.com/MauricioPerera/kite-lite"
 [dependencies]
 anyhow = "1"
 serde_json = "1"
-kite-lite-core = { path = "../kite-lite-core", version = "0.1.4" }
+kite-lite-core = { path = "../kite-lite-core", version = "0.1.5" }
