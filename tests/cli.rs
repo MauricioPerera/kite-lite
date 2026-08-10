@@ -95,6 +95,34 @@ fn eval_runs_isolated_js_and_returns_document_title() {
 }
 
 #[test]
+fn eval_handles_a_result_bigger_than_the_stdout_pipe_buffer() {
+    // Regression test: the parent process used to only read the child's
+    // stdout after polling `try_wait` showed it had exited, so a result
+    // larger than the OS pipe buffer (commonly 64KB) blocked the child
+    // mid-write with nobody draining it — a real deadlock previously masked
+    // as a false "JavaScript execution exceeded" timeout. 300,000 chars
+    // comfortably clears any such buffer.
+    let page = write_sample_page("eval-large-output-page.json");
+
+    let output = Command::new(bin_path())
+        .args([
+            "eval",
+            page.0.to_str().unwrap(),
+            "--js",
+            "'x'.repeat(300000)",
+        ])
+        .output()
+        .expect("failed to run kite-lite eval");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim().len(), 300000);
+}
+
+#[test]
 fn render_writes_svg_file() {
     let page = write_sample_page("render-page.json");
     let svg_path = temp_file("render-page.svg");

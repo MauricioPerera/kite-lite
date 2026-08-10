@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tungstenite::{accept, Message};
 
 const JS_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -1522,38 +1522,62 @@ fn evaluate_js_in_child(
         .spawn()
         .context("failed to spawn the kite-lite-js evaluator process")?;
 
-    child
+    let mut stdin = child
         .stdin
         .take()
-        .context("failed to open JavaScript child stdin")?
-        .write_all(request.as_bytes())?;
+        .context("failed to open JavaScript child stdin")?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("failed to open JavaScript child stdout")?;
 
-    let started = Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
-            let mut output = String::new();
-            child
-                .stdout
-                .take()
-                .context("failed to open JavaScript child stdout")?
-                .read_to_string(&mut output)?;
+    // Both directions run on their own thread rather than sequentially on
+    // this one: the child reads all of stdin before it writes anything, so
+    // a request bigger than the OS pipe buffer would block this thread's
+    // write() until the child drains it — fine on its own — but a *result*
+    // bigger than the pipe buffer (an eval script can return an arbitrarily
+    // long string) would then block the child's write to stdout, and this
+    // thread was only polling `try_wait` without ever reading stdout until
+    // after the child exited. Neither side could make progress: a real
+    // deadlock, previously masked by `timeout` eventually killing the
+    // child and reporting it as if the script itself had been slow.
+    // `read_to_string` on the reader thread naturally returns once the
+    // child closes stdout, so it doubles as the completion signal — no
+    // need to also poll `try_wait`.
+    std::thread::spawn(move || {
+        let _ = stdin.write_all(request.as_bytes());
+    });
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut output = String::new();
+        let result = stdout.read_to_string(&mut output).map(|_| output);
+        let _ = sender.send(result);
+    });
+
+    match receiver.recv_timeout(timeout) {
+        Ok(Ok(output)) => {
+            let _ = child.wait();
             let response: EvalResponse = serde_json::from_str(&output)
                 .context("JavaScript child returned invalid output")?;
-            return match (response.value, response.error) {
+            match (response.value, response.error) {
                 (Some(value), _) => Ok(value),
                 (_, Some(error)) => Err(anyhow::anyhow!(error)),
                 _ => Err(anyhow::anyhow!("JavaScript child returned no result")),
-            };
+            }
         }
-        if started.elapsed() >= timeout {
+        Ok(Err(error)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(anyhow::Error::new(error).context("failed to read JavaScript child stdout"))
+        }
+        Err(_timed_out) => {
             child.kill()?;
             child.wait()?;
-            return Err(anyhow::anyhow!(
+            Err(anyhow::anyhow!(
                 "JavaScript execution exceeded {} ms",
                 timeout.as_millis()
-            ));
+            ))
         }
-        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
