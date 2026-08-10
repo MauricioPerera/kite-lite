@@ -539,6 +539,13 @@ fn cdp_command(args: &[String]) -> Result<()> {
 /// needs to read those same bytes fresh if this turns out not to be a
 /// `/json*` request.
 fn handle_cdp_connection(stream: TcpStream, session: Arc<Mutex<CdpSession>>) -> Result<()> {
+    // A connection that never sends anything (or trickles bytes in slowly)
+    // would otherwise block `peek`/the discovery handler's `read` forever —
+    // this is scoped to just that one thread (each connection already runs
+    // on its own, see `cdp_command`), but still worth bounding. Cleared
+    // below once we know it's a WebSocket, since a live CDP session is
+    // supposed to block waiting for the next message.
+    stream.set_read_timeout(Some(HTTP_TIMEOUT))?;
     let mut peek_buf = [0_u8; 1024];
     let peeked = stream.peek(&mut peek_buf)?;
     let first_line = String::from_utf8_lossy(&peek_buf[..peeked])
@@ -550,6 +557,7 @@ fn handle_cdp_connection(stream: TcpStream, session: Arc<Mutex<CdpSession>>) -> 
     if first_line.starts_with("GET /json") {
         return handle_cdp_http_discovery(stream, &session);
     }
+    stream.set_read_timeout(None)?;
     handle_cdp(stream, session)
 }
 
