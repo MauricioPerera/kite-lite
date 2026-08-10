@@ -9,11 +9,15 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tungstenite::{accept, Message};
 
 const JS_TIMEOUT: Duration = Duration::from_millis(1500);
+/// Applied to every reqwest client so a page/URL controlled by whoever we're
+/// fetching can't hang a request (and, for the CDP/MCP clients, the shared
+/// session) indefinitely.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Viewport width used to compute each page's layout when no explicit
 /// render width is requested yet (e.g. right after `fetch`/navigate, before
 /// anyone calls `render`). `render_svg` recomputes layout at whatever width
@@ -152,6 +156,7 @@ fn http_client() -> Result<reqwest::Client> {
         .cookie_store(true)
         .user_agent(BROWSER_USER_AGENT)
         .default_headers(browser_like_headers())
+        .timeout(HTTP_TIMEOUT)
         .build()?)
 }
 
@@ -499,6 +504,7 @@ fn cdp_command(args: &[String]) -> Result<()> {
             .cookie_store(true)
             .user_agent(BROWSER_USER_AGENT)
             .default_headers(browser_like_headers())
+            .timeout(HTTP_TIMEOUT)
             .build()
     })?;
     let session = CdpSession {
@@ -846,11 +852,11 @@ fn cdp_response(
                 .and_then(|value| value.get("url"))
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            navigate_page(&mut session_guard, url)
+            navigate_locked(session, session_guard, url)
         }
         "Page.reload" => {
             let url = session_guard.page.url.clone().unwrap_or_default();
-            navigate_page(&mut session_guard, &url)
+            navigate_locked(session, session_guard, &url)
         }
         "Input.dispatchMouseEvent" => {
             let event_type = params
@@ -862,7 +868,7 @@ fn cdp_response(
                 .and_then(serde_json::Value::as_f64)
                 .unwrap_or(0.0);
             if event_type == "mousePressed" {
-                dispatch_click(&mut session_guard, y)
+                dispatch_click_locked(session, session_guard, y)
             } else {
                 serde_json::json!({})
             }
@@ -911,12 +917,16 @@ fn target_info(page: &kite_lite_core::Page) -> serde_json::Value {
     })
 }
 
-fn navigate_page(session: &mut CdpSession, url: &str) -> serde_json::Value {
-    if url.is_empty() {
-        return serde_json::json!({"errorText": "no URL available for navigation"});
-    }
-    match session
-        .client
+/// Runs the blocking GET plus DOM/layout rebuild for a navigation, with no
+/// dependency on `CdpSession` or its lock — callers that share a session
+/// behind an `Arc<Mutex<_>>` should release that lock before calling this
+/// (see `navigate_locked`) so a slow/unresponsive server doesn't block every
+/// other CDP command sharing the session.
+fn fetch_navigation(
+    client: &reqwest::blocking::Client,
+    url: &str,
+) -> std::result::Result<kite_lite_core::Page, serde_json::Value> {
+    match client
         .get(url)
         .send()
         .and_then(|response| response.error_for_status())
@@ -931,14 +941,56 @@ fn navigate_page(session: &mut CdpSession, url: &str) -> serde_json::Value {
                     page.cookies = cookies;
                     resolve_links(&mut page, &final_url);
                     compute_layout(&mut page, DEFAULT_VIEWPORT_WIDTH);
-                    session.page = page;
-                    session.focused_node_id = None;
-                    serde_json::json!({"frameId": "kite-lite-frame", "loaderId": "kite-lite-loader"})
+                    Ok(page)
                 }
-                Err(error) => serde_json::json!({"errorText": error.to_string()}),
+                Err(error) => Err(serde_json::json!({"errorText": error.to_string()})),
             }
         }
-        Err(error) => serde_json::json!({"errorText": error.to_string()}),
+        Err(error) => Err(serde_json::json!({"errorText": error.to_string()})),
+    }
+}
+
+/// Commits a fetched page to the session. Cheap (no I/O) — safe to run
+/// while holding the session lock.
+fn apply_navigation(session: &mut CdpSession, page: kite_lite_core::Page) -> serde_json::Value {
+    session.page = page;
+    session.focused_node_id = None;
+    serde_json::json!({"frameId": "kite-lite-frame", "loaderId": "kite-lite-loader"})
+}
+
+fn navigate_page(session: &mut CdpSession, url: &str) -> serde_json::Value {
+    if url.is_empty() {
+        return serde_json::json!({"errorText": "no URL available for navigation"});
+    }
+    match fetch_navigation(&session.client, url) {
+        Ok(page) => apply_navigation(session, page),
+        Err(error_json) => error_json,
+    }
+}
+
+/// Same as `navigate_page`, but for callers holding a `MutexGuard` on a
+/// session shared across CDP connections (`cdp_response`'s `Page.navigate`/
+/// `Page.reload`). Clones the (cheaply, `Arc`-backed) client and drops the
+/// guard before the blocking network request, then reacquires the lock only
+/// to commit the result — so this navigation no longer blocks unrelated CDP
+/// commands (e.g. another connection's `Runtime.evaluate`, or a concurrent
+/// `DOM.querySelector`) for as long as the remote server takes to respond.
+fn navigate_locked(
+    session: &Arc<Mutex<CdpSession>>,
+    guard: MutexGuard<CdpSession>,
+    url: &str,
+) -> serde_json::Value {
+    if url.is_empty() {
+        return serde_json::json!({"errorText": "no URL available for navigation"});
+    }
+    let client = guard.client.clone();
+    drop(guard);
+    match fetch_navigation(&client, url) {
+        Ok(page) => match session.lock() {
+            Ok(mut guard) => apply_navigation(&mut guard, page),
+            Err(_) => serde_json::json!({"errorText": "page state unavailable"}),
+        },
+        Err(error_json) => error_json,
     }
 }
 
@@ -1204,9 +1256,45 @@ fn collect_form_fields(element: &kite_lite_core::Element, fields: &mut Vec<(Stri
     }
 }
 
-fn dispatch_click(session: &mut CdpSession, y: f64) -> serde_json::Value {
-    let action = plan_click(&session.page, y);
-    apply_click_action(session, action)
+/// Locates the click, then dispatches to `navigate_locked`/local state via
+/// `apply_click_action_locked` for callers holding a `MutexGuard` on a
+/// session shared across CDP connections (`cdp_response`'s
+/// `Input.dispatchMouseEvent`). Only the `Navigate`/`Submit` actions involve
+/// network I/O; those hand off to `navigate_locked` to release the lock
+/// during the request, same as `Page.navigate`/`Page.reload` — otherwise a
+/// click that submits a form to a slow server would block every other CDP
+/// command sharing this session for as long as that request takes.
+fn dispatch_click_locked(
+    session: &Arc<Mutex<CdpSession>>,
+    guard: MutexGuard<CdpSession>,
+    y: f64,
+) -> serde_json::Value {
+    let action = plan_click(&guard.page, y);
+    apply_click_action_locked(session, guard, action)
+}
+
+fn apply_click_action_locked(
+    session: &Arc<Mutex<CdpSession>>,
+    mut guard: MutexGuard<CdpSession>,
+    action: ClickAction,
+) -> serde_json::Value {
+    match action {
+        ClickAction::Navigate(url) => navigate_locked(session, guard, &url),
+        ClickAction::Focus(node_id) => {
+            guard.focused_node_id = Some(node_id);
+            serde_json::json!({})
+        }
+        ClickAction::Submit { action_url, query } => {
+            let separator = if action_url.contains('?') { "&" } else { "?" };
+            let target = if query.is_empty() {
+                action_url
+            } else {
+                format!("{action_url}{separator}{query}")
+            };
+            navigate_locked(session, guard, &target)
+        }
+        ClickAction::None => serde_json::json!({}),
+    }
 }
 
 fn apply_click_action(session: &mut CdpSession, action: ClickAction) -> serde_json::Value {
@@ -1421,11 +1509,13 @@ fn mcp_command() -> Result<()> {
         .cookie_store(true)
         .user_agent(BROWSER_USER_AGENT)
         .default_headers(browser_like_headers())
+        .timeout(HTTP_TIMEOUT)
         .build()?;
     let browser_client = reqwest::blocking::Client::builder()
         .cookie_store(true)
         .user_agent(BROWSER_USER_AGENT)
         .default_headers(browser_like_headers())
+        .timeout(HTTP_TIMEOUT)
         .build()?;
     let mut session = CdpSession {
         page: parse_html("<title>New Page</title><body></body>"),
