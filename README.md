@@ -1,5 +1,8 @@
 # kite-lite
 
+[![M8ven Verified](https://m8ven.ai/badge/mcp/mauricioperera-kite-lite-1ujjo9)](https://m8ven.ai/mcp/mauricioperera-kite-lite-1ujjo9)
+<!-- m8ven-verify: 65c4feb01b6a9e62bbf352731130f73f -->
+
 mcp-name: io.github.MauricioPerera/kite-lite
 
 Motor web ligero, autocontenido y orientado a agentes. Está diseñado para
